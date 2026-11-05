@@ -139,6 +139,10 @@ select {
       <img id="image" alt="" hidden>
       <canvas id="overlay" role="img" aria-label="検出した車の枠"></canvas>
     </div>
+    <p id="focusNote" class="hint" hidden></p>
+    <label id="lensRow" class="row" for="lens" hidden>レンズ
+      <select id="lens"></select>
+    </label>
     <label id="positionRow" class="row" for="position" hidden>検出範囲の上下
       <input id="position" type="range" min="0" max="1" step="0.01" value="0">
     </label>

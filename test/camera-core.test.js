@@ -6,6 +6,7 @@ import {
   BrakeLightDetector,
   brakeLightScore,
   cropRegion,
+  focusConstraints,
   iou,
   judgeSpeed,
   judgeThrottle,
@@ -54,6 +55,16 @@ test('縦長の映像は横幅いっぱいの正方形を、指定した高さ�
 test('横長の映像は中央の正方形を切り出し、全体指定では切り出さない', () => {
   assert.deepEqual(cropRegion(1280, 720), { x: 280, y: 0, w: 720, h: 720 });
   assert.deepEqual(cropRegion(1280, 720, 'full'), { x: 0, y: 0, w: 1280, h: 720 });
+});
+
+test('ピントの設定は端末が対応しているものだけを使う', () => {
+  assert.deepEqual(focusConstraints({}, {}), {});
+  assert.deepEqual(focusConstraints({ focusMode: ['manual'] }, {}), {});
+  assert.deepEqual(focusConstraints({ focusMode: ['continuous'] }, {}), { focusMode: 'continuous' });
+  assert.deepEqual(
+    focusConstraints({ focusMode: ['continuous'] }, { pointsOfInterest: true }, { x: 0.5, y: 1.4 }),
+    { focusMode: 'continuous', pointsOfInterest: [{ x: 0.5, y: 1 }] },
+  );
 });
 
 test('iou は重なりの割合を返す', () => {

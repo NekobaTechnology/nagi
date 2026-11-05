@@ -1,5 +1,5 @@
 // 電波の弱い場所でも起動できるよう、アプリ本体をキャッシュする
-const CACHE = 'nagi-v3';
+const CACHE = 'nagi-v4';
 const FILES = [
   './',
   'index.html',

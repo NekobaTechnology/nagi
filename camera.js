@@ -5,6 +5,7 @@ import {
   VEHICLE_LABELS,
   brakeLightScore,
   cropRegion,
+  focusConstraints,
   judgeSpeed,
   judgeThrottle,
 } from './camera-core.js';
@@ -17,6 +18,9 @@ const MODEL_URL =
 const CROP_SIZE = 640;
 const POSITION_KEY = 'nagi.camera.position';
 const DEFAULT_POSITION = 0; // 縦向きの車載では、下側にダッシュボードが写り道路は上側に来る
+
+const FOCUS_NOTE =
+  'この端末はブラウザからピント位置を指定できません。ピントが道路に合わないときは、停車中にカメラを少し上へ向け、道路を映像の中央に近づけてください。別のレンズを選ぶと改善する場合もあります。';
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -62,10 +66,7 @@ async function openCamera() {
   }
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
+    stream = await requestStream();
   } catch (error) {
     if (error.name === 'NotAllowedError') {
       throw new Error('カメラの使用が許可されませんでした。ブラウザの設定で許可してから、もう一度お試しください。');
@@ -77,7 +78,96 @@ async function openCamera() {
   video.hidden = false;
   $('image').hidden = true;
   await video.play();
-  return { source: video, label: 'カメラ', cleanup: () => stream.getTracks().forEach((t) => t.stop()) };
+  const camera = { stream, focus: null };
+  return {
+    source: video,
+    label: 'カメラ',
+    camera,
+    cleanup: () => camera.stream.getTracks().forEach((t) => t.stop()),
+  };
+}
+
+function requestStream(deviceId = null) {
+  const size = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  const lens = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } };
+  return navigator.mediaDevices.getUserMedia({ audio: false, video: { ...lens, ...size } });
+}
+
+// 検出範囲の上から4割あたりにピントを合わせる。遠くの車はこの高さに写りやすい
+async function applyFocus(current) {
+  const track = current.camera.stream.getVideoTracks()[0];
+  const size = sourceSize(current.source);
+  if (!track || !size.width) return;
+  const region = cropRegion(size.width, size.height, current.regionMode, current.position);
+  const point = { x: 0.5, y: (region.y + region.h * 0.4) / size.height };
+  const capabilities = track.getCapabilities?.() ?? {};
+  const supported = navigator.mediaDevices.getSupportedConstraints?.() ?? {};
+  const constraints = focusConstraints(capabilities, supported, point);
+
+  let pointApplied = false;
+  if (Object.keys(constraints).length) {
+    try {
+      await track.applyConstraints({ advanced: [constraints] });
+      pointApplied = Boolean(constraints.pointsOfInterest);
+    } catch {
+      pointApplied = false;
+    }
+  }
+  current.camera.focus = {
+    pointApplied,
+    modes: capabilities.focusMode ?? [],
+    lens: track.label,
+  };
+  if (session === current) $('focusNote').hidden = pointApplied;
+}
+
+async function initCameraControls(current) {
+  await applyFocus(current);
+  let devices = [];
+  try {
+    devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  } catch {
+    devices = [];
+  }
+  if (session !== current) return;
+  const activeId = current.camera.stream.getVideoTracks()[0]?.getSettings?.().deviceId;
+  const select = $('lens');
+  select.replaceChildren(
+    ...devices.map((device, i) => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || `カメラ ${i + 1}`;
+      return option;
+    }),
+  );
+  if (activeId) select.value = activeId;
+  $('lensRow').hidden = devices.length < 2;
+}
+
+async function switchLens(current, deviceId) {
+  let next;
+  try {
+    next = await requestStream(deviceId);
+  } catch {
+    $('focusNote').textContent = 'このレンズは開けませんでした。別のレンズを選んでください。';
+    $('focusNote').hidden = false;
+    return;
+  }
+  if (session !== current) {
+    next.getTracks().forEach((t) => t.stop());
+    return;
+  }
+  const previous = current.camera.stream;
+  current.camera.stream = next;
+  current.source.srcObject = next;
+  await current.source.play();
+  previous.getTracks().forEach((t) => t.stop());
+  current.tracker.reset();
+  current.brake.reset();
+  current.size = sourceSize(current.source);
+  $('stage').style.aspectRatio = `${current.size.width} / ${current.size.height}`;
+  $('focusNote').textContent = FOCUS_NOTE;
+  await applyFocus(current);
 }
 
 async function openFile(file) {
@@ -317,6 +407,10 @@ async function start(openSource) {
   }
   $('mBackend').textContent = session.backend;
   $('stopBtn').disabled = false;
+  $('lensRow').hidden = true;
+  $('focusNote').textContent = FOCUS_NOTE;
+  $('focusNote').hidden = true;
+  if (session.camera) initCameraControls(session);
   $('leadStatus').textContent = '前の車を探しています';
   requestWakeLock(session);
   scheduleLoop(session);
@@ -386,6 +480,11 @@ function renderResult(current, batteryEnd) {
     `接近と判定した割合: ${s.frames ? ((current.closingFrames / s.frames) * 100).toFixed(0) : 0}%`,
     `ブレーキ灯らしき判定の割合: ${s.frames ? ((current.brakeFrames / s.frames) * 100).toFixed(0) : 0}%`,
   ];
+  if (current.camera?.focus) {
+    const { lens, pointApplied, modes } = current.camera.focus;
+    lines.push(`レンズ: ${lens || '不明'}`);
+    lines.push(`ピント位置の指定: ${pointApplied ? '有効' : '非対応'} / 対応モード: ${modes.join(', ') || 'なし'}`);
+  }
   if (current.hiddenCount > 0) {
     lines.push(`注意: 計測中に画面が${current.hiddenCount}回隠れました。隠れている間は処理が止まるため、更新回数は実力より低く出ます。`);
   }
@@ -420,12 +519,16 @@ $('position').addEventListener('input', () => {
     // 基準の位置が変わるので、車の追跡を測り直す
     session.tracker.reset();
     session.brake.reset();
+    if (session.camera) applyFocus(session);
   }
   try {
     localStorage.setItem(POSITION_KEY, $('position').value);
   } catch {
     // 保存できなくても計測は続ける
   }
+});
+$('lens').addEventListener('change', () => {
+  if (session?.camera) switchLens(session, $('lens').value);
 });
 $('stopBtn').addEventListener('click', stop);
 $('againBtn').addEventListener('click', () => {

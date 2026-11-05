@@ -23,6 +23,18 @@ export function cropRegion(width, height, mode = 'center', position = 0.5) {
   };
 }
 
+// 端末が対応しているピントの設定だけを組み立てる。座標は映像全体を 0〜1 で表す
+export function focusConstraints(capabilities = {}, supported = {}, point = { x: 0.5, y: 0.5 }) {
+  const constraints = {};
+  if (capabilities.focusMode?.includes('continuous')) constraints.focusMode = 'continuous';
+  if (supported.pointsOfInterest) {
+    constraints.pointsOfInterest = [
+      { x: Math.min(1, Math.max(0, point.x)), y: Math.min(1, Math.max(0, point.y)) },
+    ];
+  }
+  return constraints;
+}
+
 export function iou(a, b) {
   const x1 = Math.max(a.x, b.x);
   const y1 = Math.max(a.y, b.y);
