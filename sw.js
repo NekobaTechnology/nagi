@@ -1,5 +1,5 @@
 // 電波の弱い場所でも起動できるよう、アプリ本体をキャッシュする
-const CACHE = 'nagi-v2';
+const CACHE = 'nagi-v3';
 const FILES = [
   './',
   'index.html',
@@ -17,7 +17,10 @@ const FILES = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(FILES)).then(() => self.skipWaiting()),
+    caches.open(CACHE)
+      // ブラウザの通信キャッシュを通さず、新しい版を取り直す
+      .then((cache) => cache.addAll(FILES.map((file) => new Request(file, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
   );
 });
 

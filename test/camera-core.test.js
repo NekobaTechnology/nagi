@@ -5,6 +5,7 @@ import {
   PerfStats,
   BrakeLightDetector,
   brakeLightScore,
+  cropRegion,
   iou,
   judgeSpeed,
   judgeThrottle,
@@ -44,6 +45,17 @@ function run(widthAt, { seconds = 4, fps = 10, noise = 0 } = {}) {
   return { result, statuses };
 }
 
+test('縦長の映像は横幅いっぱいの正方形を、指定した高さで切り出す', () => {
+  assert.deepEqual(cropRegion(720, 1280), { x: 0, y: 280, w: 720, h: 720 });
+  assert.deepEqual(cropRegion(720, 1280, 'center', 0), { x: 0, y: 0, w: 720, h: 720 });
+  assert.deepEqual(cropRegion(720, 1280, 'center', 1), { x: 0, y: 560, w: 720, h: 720 });
+});
+
+test('横長の映像は中央の正方形を切り出し、全体指定では切り出さない', () => {
+  assert.deepEqual(cropRegion(1280, 720), { x: 280, y: 0, w: 720, h: 720 });
+  assert.deepEqual(cropRegion(1280, 720, 'full'), { x: 0, y: 0, w: 1280, h: 720 });
+});
+
 test('iou は重なりの割合を返す', () => {
   const box = { x: 0, y: 0, w: 10, h: 10 };
   assert.equal(iou(box, box), 1);
@@ -56,6 +68,14 @@ test('前の車には中央の車を選び、隣の車線や遠くの大きな�
   const sky = { x: 560, y: 0, w: 300, h: 100 };
   assert.equal(pickLead([side, center, sky], W, H), center);
   assert.equal(pickLead([side], W, H), null);
+});
+
+test('ダッシュボードを誤認した範囲いっぱいの枠は前の車に選ばない', () => {
+  const dashboard = { x: 0, y: 320, w: 720, h: 400 };
+  const van = { x: 280, y: 180, w: 160, h: 200 };
+  assert.equal(pickLead([dashboard, van], 720, 720), van);
+  assert.equal(pickLead([dashboard], 720, 720), null);
+  assert.equal(pickLead([dashboard], 720, 720, dashboard), null);
 });
 
 test('追跡中はより大きな車が現れても同じ車を追う', () => {

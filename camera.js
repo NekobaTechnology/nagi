@@ -4,6 +4,7 @@ import {
   PerfStats,
   VEHICLE_LABELS,
   brakeLightScore,
+  cropRegion,
   judgeSpeed,
   judgeThrottle,
 } from './camera-core.js';
@@ -12,6 +13,10 @@ const TASKS_VERSION = '0.10.21';
 const TASKS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}`;
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite';
+
+const CROP_SIZE = 640;
+const POSITION_KEY = 'nagi.camera.position';
+const DEFAULT_POSITION = 0; // 縦向きの車載では、下側にダッシュボードが写り道路は上側に来る
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -107,24 +112,41 @@ function toBoxes(detections) {
   }));
 }
 
-function drawOverlay(canvas, size, boxes, lead) {
+function loadPosition() {
+  try {
+    const value = Number(localStorage.getItem(POSITION_KEY));
+    return localStorage.getItem(POSITION_KEY) !== null && Number.isFinite(value) ? value : DEFAULT_POSITION;
+  } catch {
+    return DEFAULT_POSITION;
+  }
+}
+
+function drawOverlay(canvas, size, boxes, lead, region, showRegion) {
   if (canvas.width !== size.width || canvas.height !== size.height) {
     canvas.width = size.width;
     canvas.height = size.height;
   }
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const stroke = Math.max(2, size.width / 320);
+  const stroke = Math.max(2, Math.max(size.width, size.height) / 500);
+  if (showRegion) {
+    ctx.lineWidth = stroke;
+    ctx.setLineDash([stroke * 4, stroke * 4]);
+    ctx.strokeStyle = css('--fg');
+    ctx.strokeRect(region.x, region.y, region.w, region.h);
+    ctx.setLineDash([]);
+  }
+  // 枠の座標は検出範囲が基準なので、映像の位置へ戻して描く
   for (const box of boxes) {
     if (box === lead.box) continue;
     ctx.lineWidth = stroke;
     ctx.strokeStyle = css('--muted');
-    ctx.strokeRect(box.x, box.y, box.w, box.h);
+    ctx.strokeRect(region.x + box.x, region.y + box.y, box.w, box.h);
   }
   if (lead.box) {
     ctx.lineWidth = stroke * 2;
     ctx.strokeStyle = lead.status === 'closing' ? css('--bad') : css('--water');
-    ctx.strokeRect(lead.box.x, lead.box.y, lead.box.w, lead.box.h);
+    ctx.strokeRect(region.x + lead.box.x, region.y + lead.box.y, lead.box.w, lead.box.h);
   }
 }
 
@@ -143,10 +165,10 @@ function describeLead(lead, brakeLit) {
   $('brakeStatus').textContent = brakeLit ? 'ブレーキ灯らしき赤を検出（試験機能）' : '';
 }
 
-function readBrakeScore(session, box, source, size) {
+function readBrakeScore(session, box, source, size, region) {
   const { sampler } = session;
-  const x = Math.max(0, box.x);
-  const y = Math.max(0, box.y);
+  const x = Math.max(0, region.x + box.x);
+  const y = Math.max(0, region.y + box.y);
   const w = Math.min(size.width - x, box.w);
   const h = Math.min(size.height - y, box.h);
   if (w < 8 || h < 8) return 0;
@@ -160,21 +182,38 @@ function processFrame(current) {
   const size = sourceSize(source);
   if (!size.width) return;
 
+  const region = cropRegion(size.width, size.height, current.regionMode, current.position);
+  const portrait = size.height > size.width;
+  $('positionRow').hidden = !(portrait && current.regionMode === 'center');
+
   const started = performance.now();
-  const { detections } = detector.detectForVideo(source, started);
+  let input = source;
+  let ratio = 1;
+  if (current.regionMode === 'center') {
+    current.crop.getContext('2d').drawImage(source, region.x, region.y, region.w, region.h, 0, 0, CROP_SIZE, CROP_SIZE);
+    input = current.crop;
+    ratio = region.w / CROP_SIZE;
+  }
+  const { detections } = detector.detectForVideo(input, started);
   const latency = performance.now() - started;
 
   const t = started / 1000;
-  const boxes = toBoxes(detections);
-  const lead = tracker.update(t, boxes, size.width, size.height);
+  const boxes = toBoxes(detections).map((b) => ({
+    ...b,
+    x: b.x * ratio,
+    y: b.y * ratio,
+    w: b.w * ratio,
+    h: b.h * ratio,
+  }));
+  const lead = tracker.update(t, boxes, region.w, region.h);
   const tracked = lead.status !== 'none' && lead.status !== 'lost';
-  const brakeLit = tracked ? brake.update(t, readBrakeScore(current, lead.box, source, size)) : false;
+  const brakeLit = tracked ? brake.update(t, readBrakeScore(current, lead.box, source, size, region)) : false;
   if (!tracked) brake.reset();
   if (brakeLit) current.brakeFrames++;
   if (lead.status === 'closing') current.closingFrames++;
 
   stats.add(t, latency, { vehicle: boxes.length > 0, lead: tracked });
-  drawOverlay($('overlay'), size, boxes, lead);
+  drawOverlay($('overlay'), size, boxes, lead, region, current.regionMode === 'center');
   describeLead(lead, brakeLit);
 
   const { fps, latency: p50 } = stats.current;
@@ -246,11 +285,17 @@ async function start(openSource) {
     const sampler = document.createElement('canvas');
     sampler.width = 48;
     sampler.height = 32;
+    const crop = document.createElement('canvas');
+    crop.width = CROP_SIZE;
+    crop.height = CROP_SIZE;
     session = {
       ...opened,
       detector,
       backend,
       sampler,
+      crop,
+      regionMode: $('regionMode').value,
+      position: Number($('position').value),
       size,
       stats: new PerfStats(),
       tracker: new LeadTracker(),
@@ -331,6 +376,7 @@ function renderResult(current, batteryEnd) {
     `端末: ${navigator.userAgent}`,
     `入力: ${current.label} ${current.size.width}x${current.size.height}`,
     `処理方式: ${current.backend}`,
+    `検出範囲: ${current.regionMode === 'center' ? '中央を切り出し' : '映像全体'}`,
     `モデル: EfficientDet-Lite0 float16 / tasks-vision ${TASKS_VERSION}`,
     `計測時間: ${Math.round(s.elapsed)}秒 (${s.frames}フレーム)`,
     `更新回数: ${s.fps.toFixed(1)}回/秒`,
@@ -366,6 +412,20 @@ $('startCamera').addEventListener('click', () => start(openCamera));
 $('fileInput').addEventListener('change', (event) => {
   const [file] = event.target.files;
   if (file) start(() => openFile(file));
+});
+$('position').value = loadPosition();
+$('position').addEventListener('input', () => {
+  if (session) {
+    session.position = Number($('position').value);
+    // 基準の位置が変わるので、車の追跡を測り直す
+    session.tracker.reset();
+    session.brake.reset();
+  }
+  try {
+    localStorage.setItem(POSITION_KEY, $('position').value);
+  } catch {
+    // 保存できなくても計測は続ける
+  }
 });
 $('stopBtn').addEventListener('click', stop);
 $('againBtn').addEventListener('click', () => {

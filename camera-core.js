@@ -10,6 +10,19 @@ const MIN_SPAN_SEC = 0.7;
 const MIN_SAMPLES = 4;
 const LOST_GRACE_SEC = 0.5;
 
+// 検出する範囲を決める。モデルは正方形に縮めて処理するので、
+// 中央を正方形に切り出すと車が潰れず、遠くの車も大きく写る
+export function cropRegion(width, height, mode = 'center', position = 0.5) {
+  if (mode === 'full') return { x: 0, y: 0, w: width, h: height };
+  const side = Math.min(width, height);
+  return {
+    x: Math.round((width - side) / 2),
+    y: Math.round((height - side) * Math.min(1, Math.max(0, position))),
+    w: side,
+    h: side,
+  };
+}
+
 export function iou(a, b) {
   const x1 = Math.max(a.x, b.x);
   const y1 = Math.max(a.y, b.y);
@@ -21,7 +34,9 @@ export function iou(a, b) {
 }
 
 // 前の車は、画面の中央付近で足元が見えている、いちばん大きな車とする
-export function pickLead(boxes, width, height, previous = null) {
+export function pickLead(allBoxes, width, height, previous = null) {
+  // 範囲いっぱいの枠は、ダッシュボードやボンネットを車と誤認したもの
+  const boxes = allBoxes.filter((box) => box.w <= width * 0.8);
   if (previous) {
     let best = null;
     let bestOverlap = 0.3;
