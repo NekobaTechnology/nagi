@@ -109,7 +109,19 @@ test('ダッシュボードを誤認した範囲いっぱいの枠は前の車�
   const van = { x: 280, y: 180, w: 160, h: 200 };
   assert.equal(pickLead([dashboard, van], 720, 720), van);
   assert.equal(pickLead([dashboard], 720, 720), null);
-  assert.equal(pickLead([dashboard], 720, 720, dashboard), null);
+  // 離れた場所の車を追跡中に現れても乗り移らない
+  assert.equal(pickLead([dashboard], 720, 720, { x: 280, y: 100, w: 160, h: 200 }), null);
+});
+
+test('追跡中の車が近づいて範囲いっぱいになっても見失わない', () => {
+  const tracker = new LeadTracker();
+  const car = (w) => ({ x: (720 - w) / 2, y: 80, w, h: w * 0.9 });
+  let result;
+  for (let i = 0; i <= 20; i++) result = tracker.update(i * 0.1, [car(Math.min(700, 400 + i * 30))], 720, 720);
+  assert.equal(result.box.w, 700);
+  assert.notEqual(result.status, 'none');
+  for (let i = 21; i <= 60; i++) result = tracker.update(i * 0.1, [car(700)], 720, 720);
+  assert.equal(result.status, 'steady');
 });
 
 test('追跡中はより大きな車が現れても同じ車を追う', () => {

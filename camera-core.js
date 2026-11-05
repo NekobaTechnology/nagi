@@ -48,9 +48,12 @@ export function iou(a, b) {
 // 前の車は、画面の中央付近で足元が見えている、いちばん大きな車とする
 // corridor を渡すと、画面の中央ではなく自分の車線の中にいる車から選ぶ
 export function pickLead(allBoxes, width, height, previous = null, corridor = null) {
-  // 範囲いっぱいの枠は、ダッシュボードやボンネットを車と誤認したもの
+  // 突然現れる範囲いっぱいの枠は、ダッシュボードやボンネットを車と誤認したもの。
+  // 追跡中の車が近づいて大きくなった枠は残す
   const boxes = allBoxes.filter(
-    (box) => box.w <= width * 0.8 && (!corridor || corridor(box.x + box.w / 2, box.y + box.h)),
+    (box) =>
+      (box.w <= width * 0.8 || (previous && iou(box, previous) > 0.3)) &&
+      (!corridor || corridor(box.x + box.w / 2, box.y + box.h)),
   );
   if (previous) {
     let best = null;
