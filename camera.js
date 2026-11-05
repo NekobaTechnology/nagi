@@ -221,7 +221,7 @@ function loadBand(key) {
   } catch {
     // 保存を読めないときは初期値を使う
   }
-  return /望遠|tele/i.test(key) ? { top: 0.5, bottom: 0.78 } : { top: 0.32, bottom: 0.43 };
+  return /望遠|tele/i.test(key) ? { top: 0.5, bottom: 0.74 } : { top: 0.32, bottom: 0.43 };
 }
 
 function saveBand(key, band) {

@@ -5,6 +5,7 @@ import {
   detectLaneMarks,
   fitLaneLine,
   inLane,
+  isPlausiblePair,
   lineToSource,
   lineX,
   toGray,
@@ -99,6 +100,34 @@ test('画面の反対側にある縦の模様を白線にしない', () => {
   };
   assert.equal(runFrames(() => road({ lines: [], extra: pole(350, -0.15) })).status, 'none');
   assert.equal(runFrames(() => road({ lines: [], extra: pole(120, 0.15) })).status, 'none');
+});
+
+test('帯の中で交差する線や、間隔が狭すぎる線は車線にしない', () => {
+  // 横断歩道で出た交差
+  assert.equal(isPlausiblePair({ a: -0.5, b: 220 }, { a: 0.5, b: 190 }, W, H), false);
+  // ガードレールなどの狭い組み合わせ
+  assert.equal(isPlausiblePair({ a: -0.2, b: 240 }, { a: 0.2, b: 240 }, W, H), false);
+  assert.equal(isPlausiblePair({ a: -1, b: 180 }, { a: 1, b: 300 }, W, H), true);
+  const crossing = road({ vpX: 240, vpY: 40, lines: [150, 330] });
+  assert.equal(runFrames(() => crossing).status, 'none');
+});
+
+test('細かい模様が並ぶ行は白線の候補にしない', () => {
+  const droplets = (gray) => {
+    for (let y = 0; y < H; y++) {
+      for (let x = 20; x < W - 20; x += 30) {
+        for (let k = 0; k < 4; k++) gray[y * W + x + k] = 220;
+      }
+    }
+  };
+  assert.deepEqual(detectLaneMarks(road({ lines: [], extra: droplets }), W, H), []);
+});
+
+test('一瞬だけ現れた線は採用せず、続いた線を採用する', () => {
+  const tracker = new LaneTracker();
+  assert.equal(tracker.update(0, road(), W, H).status, 'none');
+  assert.equal(tracker.update(0.2, road(), W, H).status, 'none');
+  assert.equal(tracker.update(0.6, road(), W, H).status, 'both');
 });
 
 test('白線のない路面では検出しない', () => {

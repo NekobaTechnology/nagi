@@ -14,6 +14,9 @@ const ACCUMULATE_SEC = 0.4; // 破線でも線がつながるよう、少しの�
 const HOLD_SEC = 1;
 const SMOOTHING = 0.35;
 const CURVE_THRESHOLD = 0.08;
+const MAX_MARKS_PER_ROW = 6; // 水滴や生け垣の行は候補が多くなる
+const MIN_LANE_WIDTH = 0.35; // 帯の下端での車線の幅（画面幅に対する割合）
+const CONFIRM_SEC = 0.5; // 路面の矢印などの一瞬の形を線にしない
 
 export function toGray(rgba, width, height) {
   const gray = new Uint8ClampedArray(width * height);
@@ -56,6 +59,7 @@ export function detectLaneMarks(gray, width, height, masks = []) {
       }
     }
     const median = rowMedian(gray, offset, width);
+    const row = [];
     for (let x = 3; x < width - 3; x++) {
       const value = response[x];
       if (value < MIN_CONTRAST || levels[x] < median + MIN_ABOVE_ROAD) continue;
@@ -65,8 +69,9 @@ export function detectLaneMarks(gray, width, height, masks = []) {
       }
       if (!peak) continue;
       if (masks.some((m) => x >= m.x && x <= m.x + m.w && y >= m.y && y <= m.y + m.h)) continue;
-      points.push({ x, y });
+      row.push({ x, y });
     }
+    if (row.length <= MAX_MARKS_PER_ROW) points.push(...row);
   }
   return points;
 }
@@ -135,6 +140,12 @@ export function fitLaneLine(points, sign, width, height, rng, previousBottomX = 
 
 export const lineX = (line, y) => line.a * y + line.b;
 
+// 本物の車線は帯より遠くで交わり、下端である程度の幅がある
+export function isPlausiblePair(left, right, width, height) {
+  if (lineX(right, height - 1) - lineX(left, height - 1) < width * MIN_LANE_WIDTH) return false;
+  return (right.b - left.b) / (left.a - right.a) < 0;
+}
+
 // 切り出した帯の座標から映像全体の座標へ変える。s は帯の1画素が映像の何画素か
 export function lineToSource(line, roi) {
   return { a: line.a, b: roi.x + roi.scale * line.b - line.a * roi.y };
@@ -167,10 +178,10 @@ export class LaneTracker {
   smooth(state, fit, t, bottom) {
     if (!fit) return state && t - state.t <= HOLD_SEC ? state : null;
     const x0 = lineX(fit, bottom);
-    if (!state || t - state.t > HOLD_SEC) return { a: fit.a, x0, b: fit.b, t };
+    if (!state || t - state.t > HOLD_SEC) return { a: fit.a, x0, b: fit.b, t, since: t };
     const a = state.a + (fit.a - state.a) * SMOOTHING;
     const x = state.x0 + (x0 - state.x0) * SMOOTHING;
-    return { a, x0: x, b: x - a * bottom, t };
+    return { a, x0: x, b: x - a * bottom, t, since: state.since };
   }
 
   update(t, gray, width, height, masks = []) {
@@ -180,8 +191,12 @@ export class LaneTracker {
     while (this.frames.length && t - this.frames[0].t > ACCUMULATE_SEC) this.frames.shift();
     const points = this.frames.flatMap((f) => f.marks);
 
-    const leftFit = fitLaneLine(points, -1, width, height, this.rng, this.left?.x0 ?? null);
-    const rightFit = fitLaneLine(points, 1, width, height, this.rng, this.right?.x0 ?? null);
+    let leftFit = fitLaneLine(points, -1, width, height, this.rng, this.left?.x0 ?? null);
+    let rightFit = fitLaneLine(points, 1, width, height, this.rng, this.right?.x0 ?? null);
+    if (leftFit && rightFit && !isPlausiblePair(leftFit, rightFit, width, height)) {
+      leftFit = null;
+      rightFit = null;
+    }
     this.left = this.smooth(this.left, leftFit, t, bottom);
     this.right = this.smooth(this.right, rightFit, t, bottom);
 
@@ -191,14 +206,16 @@ export class LaneTracker {
       else this.left = null;
     }
 
-    const status = this.left && this.right ? 'both' : this.left ? 'left' : this.right ? 'right' : 'none';
+    const left = this.left && t - this.left.since >= CONFIRM_SEC ? this.left : null;
+    const right = this.right && t - this.right.since >= CONFIRM_SEC ? this.right : null;
+    const status = left && right ? 'both' : left ? 'left' : right ? 'right' : 'none';
     const curve = status === 'both' ? this.updateCurve(t, width) : 'unknown';
     if (status !== 'both') this.lastT = null;
 
     return {
       status,
-      left: this.left && { a: this.left.a, b: this.left.b },
-      right: this.right && { a: this.right.a, b: this.right.b },
+      left: left && { a: left.a, b: left.b },
+      right: right && { a: right.a, b: right.b },
       curve,
       marks: marks.length,
     };
