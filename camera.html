@@ -62,7 +62,7 @@ button:disabled { opacity: .5; cursor: default; }
 .primary { background: var(--water); border-color: var(--water); color: var(--on-water); font-weight: 700; font-size: 1.1rem; padding: 15px; }
 .controls { display: grid; gap: 10px; }
 .file-button input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-#position { flex: 1; min-width: 0; max-width: 60%; min-height: 32px; accent-color: var(--water); }
+#position, .slider { flex: 1; min-width: 0; max-width: 60%; min-height: 32px; accent-color: var(--water); }
 label.row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 select {
   font: inherit;
@@ -115,6 +115,12 @@ select {
           <option value="full">映像全体</option>
         </select>
       </label>
+      <label class="row" for="laneMode">白線の検出
+        <select id="laneMode">
+          <option value="on">使う</option>
+          <option value="off">使わない</option>
+        </select>
+      </label>
       <label class="row" for="delegate">処理方式
         <select id="delegate">
           <option value="auto">自動（GPU優先）</option>
@@ -128,6 +134,7 @@ select {
       <li>スマホは縦向きでも横向きでも使えます。背面カメラが前方を向くように固定し、視界を妨げない位置にしてください。</li>
       <li>縦向きでは、映像の上側を検出します。前の車が点線の枠から外れるときは、計測画面のつまみで合わせてください。合わせる作業は停車中に行います。</li>
       <li>発熱の影響を見るには、10分以上続けて計測し、充電の有無も記録してください。</li>
+      <li>白線を検出するときは、細かい点線の帯が路面に重なるよう、計測画面のつまみで合わせてください。レンズごとに覚えます。カーブの判定は試験機能で、安全の判断には使えません。</li>
       <li>映像は端末の中だけで処理し、保存も送信もしません。初回は検出モデルなど約17MBをダウンロードします。</li>
     </ul>
     <p class="hint"><a href="./">なぎの走行計測へ戻る</a></p>
@@ -146,8 +153,17 @@ select {
     <label id="positionRow" class="row" for="position" hidden>検出範囲の上下
       <input id="position" type="range" min="0" max="1" step="0.01" value="0">
     </label>
+    <div id="bandRows" class="section" hidden>
+      <label class="row" for="bandTop">路面の上端
+        <input id="bandTop" class="slider" type="range" min="0" max="0.95" step="0.01" value="0.32">
+      </label>
+      <label class="row" for="bandBottom">路面の下端
+        <input id="bandBottom" class="slider" type="range" min="0.05" max="1" step="0.01" value="0.43">
+      </label>
+    </div>
     <div>
       <div id="leadStatus" aria-live="polite">読み込み中</div>
+      <div id="laneStatus" class="hint"></div>
       <div id="brakeStatus" class="hint"></div>
     </div>
     <dl class="metrics">

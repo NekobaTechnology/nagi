@@ -46,9 +46,12 @@ export function iou(a, b) {
 }
 
 // 前の車は、画面の中央付近で足元が見えている、いちばん大きな車とする
-export function pickLead(allBoxes, width, height, previous = null) {
+// corridor を渡すと、画面の中央ではなく自分の車線の中にいる車から選ぶ
+export function pickLead(allBoxes, width, height, previous = null, corridor = null) {
   // 範囲いっぱいの枠は、ダッシュボードやボンネットを車と誤認したもの
-  const boxes = allBoxes.filter((box) => box.w <= width * 0.8);
+  const boxes = allBoxes.filter(
+    (box) => box.w <= width * 0.8 && (!corridor || corridor(box.x + box.w / 2, box.y + box.h)),
+  );
   if (previous) {
     let best = null;
     let bestOverlap = 0.3;
@@ -65,7 +68,8 @@ export function pickLead(allBoxes, width, height, previous = null) {
   for (const box of boxes) {
     const center = box.x + box.w / 2;
     const bottom = box.y + box.h;
-    if (center < width * 0.25 || center > width * 0.75 || bottom < height * 0.35) continue;
+    if (!corridor && (center < width * 0.25 || center > width * 0.75)) continue;
+    if (bottom < height * 0.35) continue;
     if (!lead || box.w * box.h > lead.w * lead.h) lead = box;
   }
   return lead;
@@ -97,10 +101,10 @@ export class LeadTracker {
     this.closingSince = null;
   }
 
-  update(t, boxes, width, height) {
+  update(t, boxes, width, height, corridor = null) {
     if (this.history.length && t - this.lastSeen > LOST_GRACE_SEC) this.reset();
 
-    const lead = pickLead(boxes, width, height, this.box);
+    const lead = pickLead(boxes, width, height, this.box, corridor);
     if (!lead) {
       if (!this.box) return { box: null, status: 'none', growth: 0, secondsToReach: null };
       return { box: this.box, status: 'lost', growth: 0, secondsToReach: null };

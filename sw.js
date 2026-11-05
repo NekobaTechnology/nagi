@@ -1,5 +1,5 @@
 // 電波の弱い場所でも起動できるよう、アプリ本体をキャッシュする
-const CACHE = 'nagi-v4';
+const CACHE = 'nagi-v5';
 const FILES = [
   './',
   'index.html',
@@ -9,6 +9,7 @@ const FILES = [
   'camera.html',
   'camera.js',
   'camera-core.js',
+  'lane-core.js',
   'manifest.webmanifest',
   'icon.svg',
   'icon-192.png',

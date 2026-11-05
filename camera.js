@@ -10,6 +10,8 @@ import {
   judgeThrottle,
 } from './camera-core.js';
 
+import { LaneTracker, inLane, lineToSource, lineX, toGray } from './lane-core.js';
+
 const TASKS_VERSION = '0.10.21';
 const TASKS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}`;
 const MODEL_URL =
@@ -17,10 +19,13 @@ const MODEL_URL =
 
 const CROP_SIZE = 640;
 const POSITION_KEY = 'nagi.camera.position';
+const BAND_KEY = 'nagi.camera.roadBand';
+const LANE_WIDTH = 360;
+const CURVE_TEXT = { left: '左カーブの可能性', right: '右カーブの可能性' };
 const DEFAULT_POSITION = 0; // 縦向きの車載では、下側にダッシュボードが写り道路は上側に来る
 
 const FOCUS_NOTE =
-  'この端末はブラウザからピント位置を指定できません。ピントが道路に合わないときは、停車中にカメラを少し上へ向け、道路を映像の中央に近づけてください。別のレンズを選ぶと改善する場合もあります。';
+  'この端末はブラウザからピント位置を指定できません。ピントが道路に合わないときは、望遠など別のレンズを選ぶか、停車中にカメラを少し上へ向けて、道路を映像の中央に近づけてください。';
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -164,6 +169,8 @@ async function switchLens(current, deviceId) {
   previous.getTracks().forEach((t) => t.stop());
   current.tracker.reset();
   current.brake.reset();
+  current.lane.reset();
+  showBand(current);
   current.size = sourceSize(current.source);
   $('stage').style.aspectRatio = `${current.size.width} / ${current.size.height}`;
   $('focusNote').textContent = FOCUS_NOTE;
@@ -202,6 +209,79 @@ function toBoxes(detections) {
   }));
 }
 
+// レンズごとに路面の写る高さが変わるので、レンズ別に覚える
+function bandKey(current) {
+  return current.camera?.stream.getVideoTracks()[0]?.label || 'file';
+}
+
+function loadBand(key) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BAND_KEY))?.[key];
+    if (saved) return saved;
+  } catch {
+    // 保存を読めないときは初期値を使う
+  }
+  return /望遠|tele/i.test(key) ? { top: 0.5, bottom: 0.78 } : { top: 0.32, bottom: 0.43 };
+}
+
+function saveBand(key, band) {
+  try {
+    const all = JSON.parse(localStorage.getItem(BAND_KEY)) ?? {};
+    localStorage.setItem(BAND_KEY, JSON.stringify({ ...all, [key]: band }));
+  } catch {
+    // 保存できなくても計測は続ける
+  }
+}
+
+function showBand(current) {
+  current.band = loadBand(bandKey(current));
+  $('bandTop').value = current.band.top;
+  $('bandBottom').value = current.band.bottom;
+  $('bandRows').hidden = !current.laneOn;
+}
+
+function processLane(current, source, size, boxes, region, t) {
+  const top = size.height * current.band.top;
+  const scale = size.width / LANE_WIDTH;
+  const rows = Math.max(8, Math.round((size.height * current.band.bottom - top) / scale));
+  const canvas = current.laneCanvas;
+  if (canvas.width !== LANE_WIDTH || canvas.height !== rows) {
+    canvas.width = LANE_WIDTH;
+    canvas.height = rows;
+    current.lane.reset();
+  }
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, top, size.width, rows * scale, 0, 0, LANE_WIDTH, rows);
+  const gray = toGray(ctx.getImageData(0, 0, LANE_WIDTH, rows).data, LANE_WIDTH, rows);
+  // 車の部分は白線と紛らわしいので除く
+  const masks = boxes.map((box) => ({
+    x: (region.x + box.x) / scale - 4,
+    y: (region.y + box.y - top) / scale - 4,
+    w: box.w / scale + 8,
+    h: box.h / scale + 8,
+  }));
+  const result = current.lane.update(t, gray, LANE_WIDTH, rows, masks);
+  const roi = { x: 0, y: top, scale };
+  return {
+    ...result,
+    top,
+    bottom: top + rows * scale,
+    left: result.left && lineToSource(result.left, roi),
+    right: result.right && lineToSource(result.right, roi),
+  };
+}
+
+function describeLane(lane) {
+  const text = {
+    both: '白線: 左右とも検出',
+    left: '白線: 左のみ検出',
+    right: '白線: 右のみ検出',
+    none: '白線: 検出なし',
+  }[lane.status];
+  const curve = CURVE_TEXT[lane.curve];
+  $('laneStatus').textContent = curve ? `${text} / ${curve}（試験機能）` : text;
+}
+
 function loadPosition() {
   try {
     const value = Number(localStorage.getItem(POSITION_KEY));
@@ -211,7 +291,7 @@ function loadPosition() {
   }
 }
 
-function drawOverlay(canvas, size, boxes, lead, region, showRegion) {
+function drawOverlay(canvas, size, boxes, lead, region, showRegion, lane) {
   if (canvas.width !== size.width || canvas.height !== size.height) {
     canvas.width = size.width;
     canvas.height = size.height;
@@ -225,6 +305,22 @@ function drawOverlay(canvas, size, boxes, lead, region, showRegion) {
     ctx.strokeStyle = css('--fg');
     ctx.strokeRect(region.x, region.y, region.w, region.h);
     ctx.setLineDash([]);
+  }
+  if (lane) {
+    ctx.lineWidth = stroke;
+    ctx.setLineDash([stroke * 2, stroke * 3]);
+    ctx.strokeStyle = css('--muted');
+    ctx.strokeRect(0, lane.top, size.width, lane.bottom - lane.top);
+    ctx.setLineDash([]);
+    ctx.lineWidth = stroke * 2.5;
+    ctx.strokeStyle = css('--warn');
+    for (const line of [lane.left, lane.right]) {
+      if (!line) continue;
+      ctx.beginPath();
+      ctx.moveTo(lineX(line, lane.top), lane.top);
+      ctx.lineTo(lineX(line, lane.bottom), lane.bottom);
+      ctx.stroke();
+    }
   }
   // 枠の座標は検出範囲が基準なので、映像の位置へ戻して描く
   for (const box of boxes) {
@@ -295,7 +391,22 @@ function processFrame(current) {
     w: b.w * ratio,
     h: b.h * ratio,
   }));
-  const lead = tracker.update(t, boxes, region.w, region.h);
+
+  let lane = null;
+  if (current.laneOn) {
+    const laneStart = performance.now();
+    lane = processLane(current, source, size, boxes, region, t);
+    current.laneStats.ms.push(performance.now() - laneStart);
+    current.laneStats[lane.status]++;
+    if (CURVE_TEXT[lane.curve]) current.laneStats.curve++;
+    describeLane(lane);
+  }
+  // 白線が左右とも見えるときは、自分の車線の中の車を前の車とする
+  const corridor =
+    lane?.status === 'both'
+      ? (x, y) => inLane(lane.left, lane.right, region.x + x, region.y + y)
+      : null;
+  const lead = tracker.update(t, boxes, region.w, region.h, corridor);
   const tracked = lead.status !== 'none' && lead.status !== 'lost';
   const brakeLit = tracked ? brake.update(t, readBrakeScore(current, lead.box, source, size, region)) : false;
   if (!tracked) brake.reset();
@@ -303,7 +414,7 @@ function processFrame(current) {
   if (lead.status === 'closing') current.closingFrames++;
 
   stats.add(t, latency, { vehicle: boxes.length > 0, lead: tracked });
-  drawOverlay($('overlay'), size, boxes, lead, region, current.regionMode === 'center');
+  drawOverlay($('overlay'), size, boxes, lead, region, current.regionMode === 'center', lane);
   describeLead(lead, brakeLit);
 
   const { fps, latency: p50 } = stats.current;
@@ -385,6 +496,10 @@ async function start(openSource) {
       sampler,
       crop,
       regionMode: $('regionMode').value,
+      laneOn: $('laneMode').value === 'on',
+      lane: new LaneTracker(),
+      laneCanvas: document.createElement('canvas'),
+      laneStats: { both: 0, left: 0, right: 0, none: 0, curve: 0, ms: [] },
       position: Number($('position').value),
       size,
       stats: new PerfStats(),
@@ -407,6 +522,8 @@ async function start(openSource) {
   }
   $('mBackend').textContent = session.backend;
   $('stopBtn').disabled = false;
+  $('laneStatus').textContent = '';
+  showBand(session);
   $('lensRow').hidden = true;
   $('focusNote').textContent = FOCUS_NOTE;
   $('focusNote').hidden = true;
@@ -480,6 +597,15 @@ function renderResult(current, batteryEnd) {
     `接近と判定した割合: ${s.frames ? ((current.closingFrames / s.frames) * 100).toFixed(0) : 0}%`,
     `ブレーキ灯らしき判定の割合: ${s.frames ? ((current.brakeFrames / s.frames) * 100).toFixed(0) : 0}%`,
   ];
+  if (current.laneOn) {
+    const stat = current.laneStats;
+    const rate = (n) => (s.frames ? `${Math.round((n / s.frames) * 100)}%` : '0%');
+    const sorted = [...stat.ms].sort((a, b) => a - b);
+    lines.push(`白線の処理: 中央値 ${(sorted[sorted.length >> 1] ?? 0).toFixed(1)} ms`);
+    lines.push(`白線の検出: 左右 ${rate(stat.both)} / 左のみ ${rate(stat.left)} / 右のみ ${rate(stat.right)} / なし ${rate(stat.none)}`);
+    lines.push(`カーブの可能性と判定した割合: ${rate(stat.curve)}`);
+    lines.push(`路面の範囲: ${current.band.top} 〜 ${current.band.bottom}`);
+  }
   if (current.camera?.focus) {
     const { lens, pointApplied, modes } = current.camera.focus;
     lines.push(`レンズ: ${lens || '不明'}`);
@@ -527,6 +653,21 @@ $('position').addEventListener('input', () => {
     // 保存できなくても計測は続ける
   }
 });
+for (const id of ['bandTop', 'bandBottom']) {
+  $(id).addEventListener('input', () => {
+    if (!session) return;
+    const top = Number($('bandTop').value);
+    const bottom = Number($('bandBottom').value);
+    // 上端と下端が入れ替わらないよう、動かしていない側を押し戻す
+    if (bottom - top < 0.05) {
+      if (id === 'bandTop') $('bandBottom').value = Math.min(1, top + 0.05);
+      else $('bandTop').value = Math.max(0, bottom - 0.05);
+    }
+    session.band = { top: Number($('bandTop').value), bottom: Number($('bandBottom').value) };
+    session.lane.reset();
+    saveBand(bandKey(session), session.band);
+  });
+}
 $('lens').addEventListener('change', () => {
   if (session?.camera) switchLens(session, $('lens').value);
 });

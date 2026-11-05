@@ -81,6 +81,22 @@ test('前の車には中央の車を選び、隣の車線や遠くの大きな�
   assert.equal(pickLead([side], W, H), null);
 });
 
+test('白線が分かるときは画面の端でも自分の車線の車を選び、隣の車線の車は選ばない', () => {
+  const corridor = (x) => x >= 100 && x <= 400;
+  const ownLane = { x: 110, y: 400, w: 120, h: 100 };
+  const nextLane = { x: 600, y: 300, w: 300, h: 250 };
+  assert.equal(pickLead([ownLane, nextLane], W, H, null, corridor), ownLane);
+  assert.equal(pickLead([nextLane], W, H, null, corridor), null);
+});
+
+test('追跡中の車が車線を変えると前の車から外す', () => {
+  const corridor = (x) => x <= 400;
+  const moved = { x: 600, y: 400, w: 120, h: 100 };
+  const before = { x: 595, y: 400, w: 120, h: 100 };
+  assert.equal(pickLead([moved], W, H, before), moved);
+  assert.equal(pickLead([moved], W, H, before, corridor), null);
+});
+
 test('ダッシュボードを誤認した範囲いっぱいの枠は前の車に選ばない', () => {
   const dashboard = { x: 0, y: 320, w: 720, h: 400 };
   const van = { x: 280, y: 180, w: 160, h: 200 };
