@@ -97,6 +97,13 @@ test('追跡中の車が車線を変えると前の車から外す', () => {
   assert.equal(pickLead([moved], W, H, before, corridor), null);
 });
 
+test('白線を誤検出して車が車線外に見えても、前の車を見失わない', () => {
+  const tracker = new LeadTracker();
+  const never = () => false;
+  assert.notEqual(tracker.update(0, [centered(200)], W, H, never).box, null);
+  assert.notEqual(tracker.update(0.1, [centered(200)], W, H, never).status, 'none');
+});
+
 test('ダッシュボードを誤認した範囲いっぱいの枠は前の車に選ばない', () => {
   const dashboard = { x: 0, y: 320, w: 720, h: 400 };
   const van = { x: 280, y: 180, w: 160, h: 200 };

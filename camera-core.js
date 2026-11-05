@@ -104,7 +104,10 @@ export class LeadTracker {
   update(t, boxes, width, height, corridor = null) {
     if (this.history.length && t - this.lastSeen > LOST_GRACE_SEC) this.reset();
 
-    const lead = pickLead(boxes, width, height, this.box, corridor);
+    // 白線の誤検出で前の車を見失わないよう、車線内にいなければ通常の判定に戻す
+    const lead =
+      pickLead(boxes, width, height, this.box, corridor) ??
+      (corridor ? pickLead(boxes, width, height, this.box) : null);
     if (!lead) {
       if (!this.box) return { box: null, status: 'none', growth: 0, secondsToReach: null };
       return { box: this.box, status: 'lost', growth: 0, secondsToReach: null };
