@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>なぎ</title>
+<meta name="description" content="同乗者が酔いにくい運転を、音声で支えるアプリ">
+<meta name="theme-color" content="#0e1b24">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+/* 夜の車内で眩しくない単一のダークテーマ。走行画面はコップ一つだけを見せる */
+:root {
+  color-scheme: dark;
+  --bg: #0e1b24;
+  --surface: #162833;
+  --line: #2a4150;
+  --fg: #e8f0f2;
+  --muted: #9fb3bb;
+  --water: #6fd3d6;
+  --on-water: #08242a;
+  --warn: #f2b45a;
+  --bad: #f2836b;
+  --font: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.7 var(--font);
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+[hidden] { display: none !important; }
+h1, h2, p { margin: 0; }
+button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+button:focus-visible, select:focus-visible { outline: 3px solid var(--water); outline-offset: 2px; }
+
+.page {
+  max-width: 560px;
+  margin: 0 auto;
+  padding-block: max(24px, env(safe-area-inset-top)) max(32px, env(safe-area-inset-bottom));
+  padding-left: max(20px, env(safe-area-inset-left));
+  padding-right: max(20px, env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* はじめの画面 */
+.brand { display: flex; align-items: center; gap: 16px; }
+.brand canvas { width: 72px; height: 88px; flex: none; }
+.brand h1 { font-size: 2.4rem; line-height: 1.1; font-weight: 600; letter-spacing: .08em; }
+.brand p { color: var(--muted); font-size: .94rem; }
+.actions { display: flex; flex-direction: column; gap: 12px; }
+.primary {
+  background: var(--water);
+  color: var(--on-water);
+  font-weight: 700;
+  font-size: 1.2rem;
+  padding: 18px;
+  border-radius: 8px;
+}
+.secondary {
+  background: var(--surface);
+  padding: 13px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+.demos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.error {
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.section { display: flex; flex-direction: column; gap: 12px; }
+.section h2 { font-size: 1rem; font-weight: 600; }
+.settings { display: grid; gap: 12px; }
+.settings label { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.notes { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .92rem; display: grid; gap: 6px; }
+.hint { color: var(--muted); font-size: .88rem; }
+
+/* 走行画面 */
+#drive {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: 8px;
+  padding-block: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-bottom));
+  padding-left: max(20px, env(safe-area-inset-left));
+  padding-right: max(20px, env(safe-area-inset-right));
+  background: var(--bg);
+}
+.topbar { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.glass-wrap { min-height: 0; display: flex; justify-content: center; align-items: center; }
+#glass { width: 100%; height: 100%; display: block; }
+.status { text-align: center; min-height: 6.4rem; display: flex; flex-direction: column; justify-content: center; }
+#statusWord { font-size: clamp(2rem, 9vw, 3rem); font-weight: 700; line-height: 1.25; }
+#statusWord[data-level="1"] { color: var(--warn); }
+#statusWord[data-level="2"] { color: var(--bad); }
+#message { font-size: 1.15rem; min-height: 2.2rem; color: var(--fg); }
+.drive-actions { display: flex; gap: 12px; }
+.drive-actions button { flex: 1; min-height: 52px; }
+@media (orientation: landscape) and (max-height: 520px) {
+  #drive { grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr auto; column-gap: 20px; }
+  .topbar { grid-column: 1 / -1; }
+  .glass-wrap { grid-row: 2 / 4; }
+  .status { align-self: center; }
+}
+
+/* 結果の画面 */
+.score { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+#scoreValue { font-size: 5rem; line-height: 1; font-weight: 700; font-variant-numeric: tabular-nums; }
+#scoreWord { font-size: 1.15rem; padding-bottom: 8px; }
+.demo-tag { color: var(--muted); font-size: .9rem; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 0; }
+.metrics div { min-width: 0; }
+.metrics dt { color: var(--muted); font-size: .84rem; }
+.metrics dd { margin: 0; font-size: 1.25rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; touch-action: pan-y; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--font); }
+.tooltip {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: .82rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.rows { list-style: none; margin: 0; padding: 0; display: grid; }
+.rows li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.rows li:first-child { border-top: 0; }
+.rows .sub { color: var(--muted); }
+.advice { display: grid; gap: 10px; }
+.advice strong { display: block; }
+</style>
+</head>
+<body>
+
+<main id="start" class="page">
+  <header class="brand">
+    <canvas id="logo" aria-hidden="true"></canvas>
+    <div>
+      <h1>なぎ</h1>
+      <p>同乗者が酔いにくい運転を、音声で支えます</p>
+    </div>
+  </header>
+
+  <p id="startError" class="error" role="alert" hidden></p>
+
+  <div class="actions">
+    <button id="startBtn" class="primary">走行をはじめる</button>
+    <div class="demos">
+      <button id="demoSmooth" class="secondary">デモ：なめらか</button>
+      <button id="demoRough" class="secondary">デモ：荒い運転</button>
+    </div>
+  </div>
+
+  <section class="section">
+    <h2>使い方</h2>
+    <ul class="notes">
+      <li>出発前にスマホをホルダーへ固定してください。向きは縦でも横でも構いません。</li>
+      <li>気になる操作は音声で伝えます。運転中は画面を見ないでください。操作は停車してから行います。</li>
+      <li>計測中はこの画面を開いたままにしてください。画面を閉じるか別のアプリに切り替えると、計測が止まります。</li>
+    </ul>
+  </section>
+
+  <section class="section">
+    <h2>設定</h2>
+    <div class="settings">
+      <label for="soundMode">お知らせ
+        <select id="soundMode">
+          <option value="voice">音声とチャイム</option>
+          <option value="chime">チャイムのみ</option>
+          <option value="off">音なし</option>
+        </select>
+      </label>
+      <label for="sensMode">判定の厳しさ
+        <select id="sensMode">
+          <option value="normal">標準</option>
+          <option value="gentle">厳しめ</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint">酔いやすい人が同乗するときは「厳しめ」がおすすめです。iPhoneはマナーモードだとチャイムが鳴らない場合があります。</p>
+  </section>
+
+  <section id="historySection" class="section" hidden>
+    <h2>これまでの走行</h2>
+    <ul id="history" class="rows"></ul>
+  </section>
+
+  <p class="hint">走行の記録はこの端末の中だけに保存します。位置情報は速度の計算だけに使い、保存しません。スコアは運転の目安で、酔いを防ぐことを保証するものではありません。</p>
+</main>
+
+<section id="drive" hidden aria-label="走行中">
+  <div class="topbar">
+    <span id="elapsed">0:00</span>
+    <span id="sensorState" aria-live="polite"></span>
+  </div>
+  <div class="glass-wrap"><canvas id="glass" role="img" aria-label="揺れを表すコップの水"></canvas></div>
+  <div class="status">
+    <div id="statusWord" data-level="0">なめらか</div>
+    <div id="message" aria-live="assertive"></div>
+  </div>
+  <div class="drive-actions">
+    <button id="endBtn" class="secondary">走行を終える</button>
+    <button id="confirmEnd" class="primary" hidden>終了して結果を見る</button>
+    <button id="cancelEnd" class="secondary" hidden>続ける</button>
+  </div>
+</section>
+
+<main id="result" class="page" hidden>
+  <div>
+    <div class="score">
+      <span id="scoreValue">0</span>
+      <span id="scoreWord"></span>
+    </div>
+    <p id="demoTag" class="demo-tag" hidden>デモ走行のため、履歴には保存していません。</p>
+  </div>
+
+  <dl class="metrics">
+    <div><dt>走行時間</dt><dd id="mTime"></dd></div>
+    <div><dt>距離</dt><dd id="mDist"></dd></div>
+    <div><dt>停止</dt><dd id="mStops"></dd></div>
+  </dl>
+
+  <section class="section">
+    <h2>酔いにつながるゆっくりした揺れ</h2>
+    <div id="chart" class="chart"></div>
+    <p class="hint">線が低いほど穏やかです。上部の丸は、気になる操作があった時点です。単位は m/s²（0.08〜0.5Hz の揺れの実効値）。</p>
+  </section>
+
+  <section id="eventsSection" class="section">
+    <h2>気になった操作</h2>
+    <ul id="eventRows" class="rows"></ul>
+  </section>
+
+  <section class="section">
+    <h2>次に意識すること</h2>
+    <div id="advice" class="advice"></div>
+  </section>
+
+  <p id="caveat" class="hint" hidden></p>
+  <button id="backBtn" class="primary">はじめの画面へ</button>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
