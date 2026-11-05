@@ -98,6 +98,8 @@ export function simulate({
   noise = 0.3,
   seed = 7,
   gpsLag = 0.6,
+  bumpAmp = 0, // 路面の段差で車体とホルダーが揺れる強さ（m/s²）
+  bumpEvery = 2.5,
 } = {}) {
   const R = rotation(mount);
   const random = prng(seed);
@@ -108,6 +110,7 @@ export function simulate({
   let t = 0;
   let v = 0;
   let nextGps = 1;
+  let lastBump = -Infinity;
 
   for (const phase of SCENARIOS[scenario]) {
     let local = 0;
@@ -119,10 +122,16 @@ export function simulate({
 
       // 停車中は路面振動なし。走行中は速度に応じた細かい振動を足す
       const vib = v > 0.1 ? noise : 0.01;
+      if (bumpAmp && v > 1 && t - lastBump > bumpEvery) lastBump = t;
+      const since = Number.isFinite(lastBump) ? t - lastBump : 0;
+      const decay = Number.isFinite(lastBump) ? Math.exp(-since / 0.35) : 0;
+      // 2Hz は車体の上下、8Hz はホルダーの振れ
+      const bump = bumpAmp * decay;
+      const rock = Math.sin(2 * Math.PI * 8 * since) + 0.6 * Math.sin(2 * Math.PI * 2 * since);
       const car = [
-        al + vib * random(),
-        lateral + vib * random(),
-        G + vib * 2 * random(),
+        al + vib * random() + bump * rock,
+        lateral + vib * random() + bump * 0.5 * rock,
+        G + vib * 2 * random() + bump * 1.5 * Math.sin(2 * Math.PI * 2 * since),
       ];
       out.push({
         t,

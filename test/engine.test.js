@@ -61,6 +61,18 @@ test('学習後の前後加速度は、車の加速と同じ符号になる', ()
   }
 });
 
+test('丁寧な運転なら、凹凸のある路面でもアラートを出さない', () => {
+  for (const [noise, bumpAmp] of [[1.2, 0], [0.6, 3], [1.2, 5]]) {
+    const s = run({ scenario: 'smooth', noise, bumpAmp });
+    assert.deepEqual(s.counts, {}, `noise=${noise} bump=${bumpAmp}`);
+  }
+});
+
+test('荒れた路面でも、荒い運転の急ブレーキは判定する', () => {
+  const s = run({ scenario: 'rough', noise: 1.2, bumpAmp: 3 });
+  assert.ok(s.counts.brake >= 1, JSON.stringify(s.counts));
+});
+
 test('カックン停止を検出し、丁寧な停止では出さない', () => {
   assert.ok(run({ scenario: 'rough' }).counts.stop >= 1);
   assert.equal(run({ scenario: 'smooth' }).counts.stop, undefined);

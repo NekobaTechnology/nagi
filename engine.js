@@ -22,6 +22,9 @@ export const SENSITIVITY = { normal: 1, gentle: 0.8 };
 const WEIGHTS = { brake: 3, accel: 2, turn: 3, rough: 3, jerk: 2, stop: 2, sway: 2 };
 const COOLDOWN = { brake: 5, accel: 5, turn: 5, rough: 5, jerk: 5, stop: 0, sway: 60 };
 
+// 判定に必要な継続時間。段差の衝撃は短く、運転操作はもっと長く続く
+const HOLD_SEC = { brake: 0.3, accel: 0.3, turn: 0.4, rough: 0.3, jerk: 0.2 };
+
 const STEP = 0.05; // 内部処理は 20Hz
 const RING = 200; // 10 秒分
 
@@ -56,6 +59,9 @@ export class RideEngine {
 
     this.g = null;
     this.smooth = null;
+    this.slow = null; // 運転操作を見るための、よりなだらかな信号
+    this.roadEma = 0; // 路面由来の細かい揺れの大きさ
+    this.held = {};
     this.tiltSince = null;
     this.suppressUntil = 0;
     this.pausedSec = 0;
@@ -125,6 +131,7 @@ export class RideEngine {
       this.accN = 0;
       this.ring = [];
       this.smooth = null;
+      this.slow = null;
       this.suppressUntil = t + 2;
     }
     this.lastSampleT = t;
@@ -142,8 +149,14 @@ export class RideEngine {
     const elapsed = t - this.t0 - this.pausedSec;
     if (!this.g) this.g = raw;
     if (!this.smooth) this.smooth = raw;
+    if (!this.slow) this.slow = raw;
 
     this.smooth = lerp3(this.smooth, raw, alpha(dt, 0.15));
+    this.slow = lerp3(this.slow, raw, alpha(dt, 0.35));
+
+    // なだらかな信号から外れた成分は、運転操作ではなく路面やホルダーの揺れ
+    const shake = sub(raw, this.slow);
+    this.roadEma += (dot(shake, shake) - this.roadEma) * alpha(dt, 1.5);
 
     // 停車中は重力を素早く補正する。ただし発進の加速を重力と誤認しないよう、
     // 加速度が小さいときに限る
@@ -158,6 +171,8 @@ export class RideEngine {
       this.tiltSince ??= t;
       if (t - this.tiltSince > 1) {
         this.g = this.smooth;
+        this.slow = this.smooth;
+        this.roadEma = 0;
         this.resetForward();
         this.ring = [];
         this.bpSlow = [0, 0, 0];
@@ -173,7 +188,7 @@ export class RideEngine {
     }
 
     const gHat = norm(this.g);
-    const a = sub(this.smooth, this.g);
+    const a = sub(this.slow, this.g);
     const h = sub(a, scale(gHat, dot(a, gHat)));
     this.h = h;
     const mag = len(h);
@@ -216,11 +231,11 @@ export class RideEngine {
       this.bucket.sum += sway2;
       this.bucket.n++;
       if (this.bucket.n >= 200) this.flushBucket();
-      this.detect(t, { long, lat, mag, jerk });
+      this.detect(t, dt, { long, lat, mag, jerk });
     }
 
     const th = THRESHOLDS;
-    const s = this.sens;
+    const s = this.sens * this.roadMargin;
     this.live = {
       long,
       lat,
@@ -240,18 +255,29 @@ export class RideEngine {
     this.bucket = { sum: 0, n: 0 };
   }
 
-  detect(t, { long, lat, mag, jerk }) {
+  // 路面が荒いほど基準を上げる。滑らかな路面では 1 倍、荒れた路面で最大 2.5 倍
+  get roadMargin() {
+    return 1 + clamp((Math.sqrt(this.roadEma) - 0.4) / 1.0, 0, 1.5);
+  }
+
+  sustained(t, dt, type, active, value) {
+    this.held[type] = active ? (this.held[type] ?? 0) + dt : 0;
+    if (this.held[type] >= HOLD_SEC[type]) this.emit(t, type, value);
+  }
+
+  detect(t, dt, { long, lat, mag, jerk }) {
     const th = THRESHOLDS;
-    const s = this.sens;
+    // 加速度が続く判定は路面の影響を受けにくいので、上げ幅を抑えて見逃しを防ぐ
+    const s = this.sens * Math.min(this.roadMargin, 1.3);
     if (long !== null) {
-      if (long < -th.brake * s) this.emit(t, 'brake', -long);
-      if (long > th.accel * s) this.emit(t, 'accel', long);
-      if (Math.abs(lat) > th.turn * s) this.emit(t, 'turn', Math.abs(lat));
-    } else if (mag > th.rough * s) {
-      this.emit(t, 'rough', mag);
+      this.sustained(t, dt, 'brake', long < -th.brake * s, -long);
+      this.sustained(t, dt, 'accel', long > th.accel * s, long);
+      this.sustained(t, dt, 'turn', Math.abs(lat) > th.turn * s, Math.abs(lat));
+    } else {
+      this.sustained(t, dt, 'rough', mag > th.rough * s, mag);
     }
-    if (jerk > th.jerk * s) this.emit(t, 'jerk', jerk);
-    if (this.movingSec > 60 && Math.sqrt(this.swayEma) > th.sway * s) {
+    this.sustained(t, dt, 'jerk', jerk > th.jerk * this.sens * this.roadMargin, jerk);
+    if (this.movingSec > 60 && Math.sqrt(this.swayEma) > th.sway * this.sens) {
       this.emit(t, 'sway', Math.sqrt(this.swayEma));
     }
   }
@@ -312,7 +338,7 @@ export class RideEngine {
       const span = cur.t - prev.t;
       if (span > 0.2) maxDrop = Math.max(maxDrop, (prev.mag - cur.mag) / span);
     }
-    if (maxDrop <= THRESHOLDS.stop * this.sens) return;
+    if (maxDrop <= THRESHOLDS.stop * this.sens * this.roadMargin) return;
 
     // 同じ停止で出た躍度イベントは二重に数えない
     const lastJerk = this.lastEventT.jerk ?? -Infinity;
