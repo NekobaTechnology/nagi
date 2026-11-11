@@ -144,50 +144,91 @@ export class LeadTracker {
   }
 }
 
-// 車体の左右で同時に赤く光っている割合を返す。赤い車は中央も赤いので差し引く
-export function brakeLightScore(rgba, width, height) {
-  const top = Math.floor(height * 0.2);
-  const bottom = Math.ceil(height * 0.7);
-  const third = Math.floor(width / 3);
-  const count = [0, 0, 0];
-  const total = [0, 0, 0];
-  for (let y = top; y < bottom; y++) {
-    for (let x = 0; x < width; x++) {
-      const zone = Math.min(2, Math.floor(x / third));
-      const i = (y * width + x) * 4;
-      const [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]];
-      total[zone]++;
-      if (r > 140 && r > g * 1.8 && r > b * 1.8) count[zone]++;
-    }
-  }
-  const [left, center, right] = count.map((c, zone) => (total[zone] ? c / total[zone] : 0));
-  return Math.max(0, Math.min(left, right) - center);
+// ブレーキ灯の手がかりを2つ返す。
+// highMount: 枠の上部中央で補助ブレーキ灯（ハイマウントストップランプ）が光っている割合。昼に効く。
+//   左右の尾灯は昼でも点いている車が多く、明るさの差では区別できなかった
+// red: 枠全体で赤く光っている割合。夜はブレーキ灯の光が車全体ににじむので、急に増える
+const HIGH_MOUNT = { top: 0.25, left: 0.25, right: 0.75 };
+const RED_BODY_SHARE = 0.25; // 上部中央がこれより広く赤いのは、灯ではなく赤い車体かにじみ
+const EDGE = 2; // 枠の縁は背景が混ざるので数えない（補助ブレーキ灯は上端近くにあるので上の1行だけ外す）
+
+function isLampRed(r, g, b) {
+  return r > 130 && r - b > 60 && r - g > 30;
 }
 
-// 尾灯の常時点灯や景色の違いを吸収するため、普段の値からの増え方で判定する
+export function brakeLightScore(rgba, width, height) {
+  const top = Math.round(height * HIGH_MOUNT.top);
+  const x0 = Math.floor(width * HIGH_MOUNT.left);
+  const x1 = Math.ceil(width * HIGH_MOUNT.right);
+  let mountTotal = 0;
+  let mountLit = 0;
+  let total = 0;
+  let lit = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const red = isLampRed(rgba[i], rgba[i + 1], rgba[i + 2]);
+      if (y >= 1 && y < top && x >= x0 && x < x1) {
+        mountTotal++;
+        if (red) mountLit++;
+      }
+      if (y >= EDGE && y < height - EDGE && x >= EDGE && x < width - EDGE) {
+        total++;
+        if (red) lit++;
+      }
+    }
+  }
+  const mount = mountTotal ? mountLit / mountTotal : 0;
+  return {
+    highMount: mount > RED_BODY_SHARE ? 0 : mount,
+    red: total ? lit / total : 0,
+  };
+}
+
+const HIGH_MOUNT_THRESHOLD = 0.01;
+const RED_JUMP = 0.25; // 普段より枠の4分の1以上が赤く光ったら、夜のブレーキとみなす
+// 普段の赤さは、下がるときは速く、上がるときはゆっくり追う。赤い車に替わったときなどに合わせる
+const RED_BASELINE_DOWN_SEC = 0.3;
+const RED_BASELINE_UP_SEC = 3;
+// 点灯中もごくゆっくり追い、赤いネオンなどで点灯したまま戻らなくなるのを防ぐ
+const RED_BASELINE_LIT_SEC = 30;
+const BRAKE_HOLD_SEC = 0.25; // 一瞬の反射で切り替わらないよう、続いたときだけ切り替える
+
 export class BrakeLightDetector {
   constructor() {
     this.reset();
   }
 
+  // 前の車が替わったら呼ぶ。赤い車は普段から赤いので、車ごとに普段の値を測り直す
   reset() {
-    this.baseline = null;
+    this.lit = false;
+    this.changeSince = null;
+    this.redBaseline = null;
     this.lastT = null;
   }
 
   update(t, score) {
-    if (this.baseline === null) {
-      this.baseline = score;
-      this.lastT = t;
-      return false;
+    const { highMount, red } = score;
+    if (this.redBaseline === null) this.redBaseline = red;
+    const now = highMount >= HIGH_MOUNT_THRESHOLD || red >= this.redBaseline + RED_JUMP;
+
+    if (now === this.lit) {
+      this.changeSince = null;
+    } else {
+      this.changeSince ??= t;
+      if (t - this.changeSince >= BRAKE_HOLD_SEC) {
+        this.lit = now;
+        this.changeSince = null;
+      }
     }
-    const lit = score > this.baseline + 0.05;
-    if (!lit) {
+    if (this.lastT !== null) {
       const dt = Math.max(0, t - this.lastT);
-      this.baseline += (score - this.baseline) * (1 - Math.exp(-dt / 5));
+      let tau = red < this.redBaseline ? RED_BASELINE_DOWN_SEC : RED_BASELINE_UP_SEC;
+      if (now) tau = RED_BASELINE_LIT_SEC;
+      this.redBaseline += (red - this.redBaseline) * (1 - Math.exp(-dt / tau));
     }
     this.lastT = t;
-    return lit;
+    return this.lit;
   }
 }
 
@@ -273,4 +314,47 @@ export function judgeThrottle(minutes) {
   if (drop > 0.3) return { level: 'bad', text: '処理速度が落ちています（発熱の可能性）', drop };
   if (drop > 0.15) return { level: 'ok', text: 'やや落ちています', drop };
   return { level: 'good', text: '大きな低下なし', drop };
+}
+
+// 走行中だけ、前の車の変化を声で先に伝える。同じ知らせを繰り返さない
+export const ADVISE_MIN_SPEED = 15 / 3.6; // 渋滞や信号待ちの発進では鳴らさない
+const ADVISE_CLOSING_SECONDS = 5; // 追いつくまでの見込みがこれより短いときだけ伝える
+const ADVISE_COOLDOWN = { leadBrake: 8, closing: 12 };
+const ADVISE_GAP = 4; // 別の知らせでも、続けて話さない
+
+export class LookaheadAdvisor {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.wasLit = false;
+    this.wasClosing = false;
+    this.lastAt = { leadBrake: -Infinity, closing: -Infinity };
+    this.lastAny = -Infinity;
+  }
+
+  // moving: 走行中か。brakeLit と lead は前の車の判定結果。知らせる種類か null を返す
+  update(t, { moving, lead, brakeLit }) {
+    const tracked = lead && lead.status !== 'none' && lead.status !== 'lost';
+    const lit = Boolean(tracked && brakeLit);
+    const closing = Boolean(
+      tracked && lead.status === 'closing' && lead.secondsToReach !== null && lead.secondsToReach <= ADVISE_CLOSING_SECONDS,
+    );
+    const litStarted = lit && !this.wasLit;
+    const closingStarted = closing && !this.wasClosing;
+    this.wasLit = lit;
+    this.wasClosing = closing;
+    if (!moving) return null;
+
+    // ブレーキ灯のほうが早く分かるので優先する
+    for (const [type, started] of [['leadBrake', litStarted], ['closing', closingStarted]]) {
+      if (!started) continue;
+      if (t - this.lastAt[type] < ADVISE_COOLDOWN[type] || t - this.lastAny < ADVISE_GAP) continue;
+      this.lastAt[type] = t;
+      this.lastAny = t;
+      return type;
+    }
+    return null;
+  }
 }

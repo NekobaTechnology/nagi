@@ -2,8 +2,6 @@ import {
   BrakeLightDetector,
   LeadTracker,
   PerfStats,
-  VEHICLE_LABELS,
-  brakeLightScore,
   cropRegion,
   focusConstraints,
   judgeSpeed,
@@ -11,18 +9,22 @@ import {
 } from './camera-core.js';
 
 import { LaneTracker, inLane, lineToSource, lineX, toGray } from './lane-core.js';
+import {
+  LENS_KEY,
+  MODEL_LABEL,
+  POSITION_KEY,
+  createCrop,
+  createDetector,
+  createSampler,
+  detectVehicles,
+  loadPosition,
+  readBrakeScore,
+  sourceSize,
+} from './vision.js';
 
-const TASKS_VERSION = '0.10.21';
-const TASKS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}`;
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite';
-
-const CROP_SIZE = 640;
-const POSITION_KEY = 'nagi.camera.position';
 const BAND_KEY = 'nagi.camera.roadBand';
 const LANE_WIDTH = 360;
 const CURVE_TEXT = { left: '左カーブの可能性', right: '右カーブの可能性' };
-const DEFAULT_POSITION = 0; // 縦向きの車載では、下側にダッシュボードが写り道路は上側に来る
 
 const FOCUS_NOTE =
   'この端末はブラウザからピント位置を指定できません。ピントが道路に合わないときは、望遠など別のレンズを選ぶか、停車中にカメラを少し上へ向けて、道路を映像の中央に近づけてください。';
@@ -38,31 +40,6 @@ function showError(text) {
   $('setup').hidden = false;
   $('running').hidden = true;
   $('result').hidden = true;
-}
-
-async function createDetector(preference) {
-  const { FilesetResolver, ObjectDetector } = await import(`${TASKS_BASE}/vision_bundle.mjs`);
-  const fileset = await FilesetResolver.forVisionTasks(`${TASKS_BASE}/wasm`);
-  const create = (delegate) =>
-    ObjectDetector.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate },
-      runningMode: 'VIDEO',
-      scoreThreshold: 0.35,
-      maxResults: 15,
-      categoryAllowlist: VEHICLE_LABELS,
-    });
-  if (preference !== 'auto') return { detector: await create(preference), backend: preference };
-  try {
-    return { detector: await create('GPU'), backend: 'GPU' };
-  } catch {
-    return { detector: await create('CPU'), backend: 'CPU' };
-  }
-}
-
-function sourceSize(source) {
-  return source.tagName === 'VIDEO'
-    ? { width: source.videoWidth, height: source.videoHeight }
-    : { width: source.naturalWidth, height: source.naturalHeight };
 }
 
 async function openCamera() {
@@ -167,6 +144,12 @@ async function switchLens(current, deviceId) {
   current.source.srcObject = next;
   await current.source.play();
   previous.getTracks().forEach((t) => t.stop());
+  // 走行画面のカメラ先読みでも同じレンズを使う
+  try {
+    localStorage.setItem(LENS_KEY, next.getVideoTracks()[0]?.label ?? '');
+  } catch {
+    // 保存できなくても計測は続ける
+  }
   current.tracker.reset();
   current.brake.reset();
   current.lane.reset();
@@ -196,17 +179,6 @@ async function openFile(file) {
   $('image').hidden = true;
   await video.play();
   return { source: video, label: '動画', cleanup };
-}
-
-function toBoxes(detections) {
-  return detections.map((d) => ({
-    x: d.boundingBox.originX,
-    y: d.boundingBox.originY,
-    w: d.boundingBox.width,
-    h: d.boundingBox.height,
-    label: d.categories[0]?.categoryName ?? '',
-    score: d.categories[0]?.score ?? 0,
-  }));
 }
 
 // レンズごとに路面の写る高さが変わるので、レンズ別に覚える
@@ -282,15 +254,6 @@ function describeLane(lane) {
   $('laneStatus').textContent = curve ? `${text} / ${curve}（試験機能）` : text;
 }
 
-function loadPosition() {
-  try {
-    const value = Number(localStorage.getItem(POSITION_KEY));
-    return localStorage.getItem(POSITION_KEY) !== null && Number.isFinite(value) ? value : DEFAULT_POSITION;
-  } catch {
-    return DEFAULT_POSITION;
-  }
-}
-
 function drawOverlay(canvas, size, boxes, lead, region, showRegion, lane) {
   if (canvas.width !== size.width || canvas.height !== size.height) {
     canvas.width = size.width;
@@ -351,18 +314,6 @@ function describeLead(lead, brakeLit) {
   $('brakeStatus').textContent = brakeLit ? 'ブレーキ灯らしき赤を検出（試験機能）' : '';
 }
 
-function readBrakeScore(session, box, source, size, region) {
-  const { sampler } = session;
-  const x = Math.max(0, region.x + box.x);
-  const y = Math.max(0, region.y + box.y);
-  const w = Math.min(size.width - x, box.w);
-  const h = Math.min(size.height - y, box.h);
-  if (w < 8 || h < 8) return 0;
-  const ctx = sampler.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(source, x, y, w, h, 0, 0, sampler.width, sampler.height);
-  return brakeLightScore(ctx.getImageData(0, 0, sampler.width, sampler.height).data, sampler.width, sampler.height);
-}
-
 function processFrame(current) {
   const { source, detector, stats, tracker, brake } = current;
   const size = sourceSize(source);
@@ -373,24 +324,10 @@ function processFrame(current) {
   $('positionRow').hidden = !(portrait && current.regionMode === 'center');
 
   const started = performance.now();
-  let input = source;
-  let ratio = 1;
-  if (current.regionMode === 'center') {
-    current.crop.getContext('2d').drawImage(source, region.x, region.y, region.w, region.h, 0, 0, CROP_SIZE, CROP_SIZE);
-    input = current.crop;
-    ratio = region.w / CROP_SIZE;
-  }
-  const { detections } = detector.detectForVideo(input, started);
+  const crop = current.regionMode === 'center' ? current.crop : null;
+  const boxes = detectVehicles(detector, source, region, crop, started);
   const latency = performance.now() - started;
-
   const t = started / 1000;
-  const boxes = toBoxes(detections).map((b) => ({
-    ...b,
-    x: b.x * ratio,
-    y: b.y * ratio,
-    w: b.w * ratio,
-    h: b.h * ratio,
-  }));
 
   let lane = null;
   if (current.laneOn) {
@@ -408,8 +345,9 @@ function processFrame(current) {
       : null;
   const lead = tracker.update(t, boxes, region.w, region.h, corridor);
   const tracked = lead.status !== 'none' && lead.status !== 'lost';
-  const brakeLit = tracked ? brake.update(t, readBrakeScore(current, lead.box, source, size, region)) : false;
-  if (!tracked) brake.reset();
+  const brakeLit = tracked ? brake.update(t, readBrakeScore(current.sampler, lead.box, source, size, region)) : false;
+  // 夜はブレーキ灯のにじみで一瞬見失いやすい。その間も同じ車の普段の赤さを保つ
+  if (lead.status === 'none') brake.reset();
   if (brakeLit) current.brakeFrames++;
   if (lead.status === 'closing') current.closingFrames++;
 
@@ -483,12 +421,8 @@ async function start(openSource) {
     const size = sourceSize(opened.source);
     stage.style.aspectRatio = `${size.width} / ${size.height}`;
     const { detector, backend } = await createDetector($('delegate').value);
-    const sampler = document.createElement('canvas');
-    sampler.width = 48;
-    sampler.height = 32;
-    const crop = document.createElement('canvas');
-    crop.width = CROP_SIZE;
-    crop.height = CROP_SIZE;
+    const sampler = createSampler();
+    const crop = createCrop();
     session = {
       ...opened,
       detector,
@@ -588,7 +522,7 @@ function renderResult(current, batteryEnd) {
     `入力: ${current.label} ${current.size.width}x${current.size.height}`,
     `処理方式: ${current.backend}`,
     `検出範囲: ${current.regionMode === 'center' ? '中央を切り出し' : '映像全体'}`,
-    `モデル: EfficientDet-Lite0 float16 / tasks-vision ${TASKS_VERSION}`,
+    `モデル: ${MODEL_LABEL}`,
     `計測時間: ${Math.round(s.elapsed)}秒 (${s.frames}フレーム)`,
     `更新回数: ${s.fps.toFixed(1)}回/秒`,
     `1回の処理: 中央値 ${s.p50.toFixed(0)} ms / 95%点 ${s.p95.toFixed(0)} ms`,

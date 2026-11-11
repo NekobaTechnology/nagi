@@ -1,3 +1,4 @@
+import { ADVISE_MIN_SPEED, LookaheadAdvisor } from './camera-core.js';
 import { RideEngine, SENSITIVITY } from './engine.js';
 import { simulate } from './sim.js';
 
@@ -41,8 +42,14 @@ const COPY = {
     tip: '加速と減速を繰り返す揺れは酔いにつながりやすいです。車間を広めにとり、速度を一定に保ちましょう。',
   },
 };
+// カメラ先読みの知らせ。運転の採点には含めない
+const LOOK_COPY = {
+  leadBrake: { name: '前の車のブレーキ', say: '前の車がブレーキ' },
+  closing: { name: '前の車への接近', say: '前の車に近づいています' },
+};
 const PRAISE = 'なめらかな運転が続いています';
 const VOICE_INTERVAL = 20;
+const URGENT_VOICE_INTERVAL = 3; // 先読みの知らせは間隔を詰める。遅れて伝えても意味がないため
 const CHIME_INTERVAL = 4;
 const PRAISE_INTERVAL = 300;
 const HISTORY_KEY = 'nagi.history';
@@ -63,7 +70,7 @@ function save(key, value) {
   }
 }
 
-const settings = { sound: 'voice', sens: 'normal', ...load(SETTINGS_KEY, {}) };
+const settings = { sound: 'voice', sens: 'normal', camera: 'off', ...load(SETTINGS_KEY, {}) };
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 /* ---------- 音 ---------- */
@@ -105,10 +112,10 @@ function chime() {
   });
 }
 
-function speak(text) {
+function speak(text, urgent = false) {
   const now = performance.now() / 1000;
   if (settings.sound !== 'voice' || !('speechSynthesis' in window)) return;
-  if (now - lastVoice < VOICE_INTERVAL) return;
+  if (now - lastVoice < (urgent ? URGENT_VOICE_INTERVAL : VOICE_INTERVAL)) return;
   lastVoice = now;
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'ja-JP';
@@ -130,50 +137,117 @@ function fitCanvas(canvas) {
   return { w, h };
 }
 
-function drawGlass(canvas, angle, color, phase = 0) {
+// 少し見下ろした立体のコップ。左が車の後ろ側、奥と手前が車の左右
+// tilt.x は前後の揺れ、tilt.z は左右の揺れによる水面の傾き（ラジアン）
+const RIM = 0.26; // 縁の楕円のつぶれ具合。小さいほど真横から見た形になる
+
+function drawGlass(canvas, tilt, color, phase = 0) {
   const { w, h } = fitCanvas(canvas);
   if (!w || !h) return;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
 
-  const gh = Math.min(h * 0.92, w * 1.15);
-  const gw = gh * 0.74;
+  const gh = Math.min(h * 0.9, w * 1.12);
+  const r1 = gh * 0.37;
+  const r0 = r1 * 0.74;
+  const ry1 = r1 * RIM;
+  const ry0 = r0 * RIM;
   const cx = w / 2;
-  const top = (h - gh) / 2;
-  const bottom = top + gh;
-  const topHalf = gw / 2;
-  const bottomHalf = gw * 0.37;
-  const path = new Path2D();
-  path.moveTo(cx - topHalf, top);
-  path.lineTo(cx - bottomHalf, bottom);
-  path.lineTo(cx + bottomHalf, bottom);
-  path.lineTo(cx + topHalf, top);
+  const yTop = (h - gh) / 2 + ry1;
+  const yBot = (h + gh) / 2 - ry0;
+  const body = yBot - yTop;
+  const line = Math.max(1.5, gh * 0.011);
+  const muted = css('--muted');
+  const { x: tiltX = 0, z: tiltZ = 0 } = typeof tilt === 'number' ? { x: tilt } : tilt;
 
-  // 水面は重心を保ったまま傾く。左が車の後ろ側
-  ctx.save();
-  ctx.clip(path);
-  const level = top + gh * 0.36;
-  const slope = Math.tan(angle) * topHalf;
-  const ripple = gh * 0.006;
+  const silhouette = new Path2D();
+  silhouette.moveTo(cx - r1, yTop);
+  silhouette.lineTo(cx - r0, yBot);
+  silhouette.ellipse(cx, yBot, r0, ry0, 0, Math.PI, 0, true);
+  silhouette.lineTo(cx + r1, yTop);
+  silhouette.ellipse(cx, yTop, r1, ry1, 0, 0, Math.PI, true);
+  silhouette.closePath();
+
+  // ガラスの奥側
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.fill(silhouette);
+  ctx.lineWidth = line * 0.7;
+  ctx.strokeStyle = muted;
+  ctx.globalAlpha = 0.45;
   ctx.beginPath();
-  ctx.moveTo(cx - topHalf * 1.1, bottom);
-  for (let i = 0; i <= 24; i++) {
-    const k = i / 24;
-    const x = cx - topHalf * 1.1 + k * topHalf * 2.2;
-    const y = level + (k - 0.5) * 2 * slope + Math.sin(k * 7 + phase) * ripple;
-    ctx.lineTo(x, y);
+  ctx.ellipse(cx, yTop, r1, ry1, 0, Math.PI, 0);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // 水面は重心を保ったまま、前後と左右の揺れで傾く
+  const level = yTop + body * 0.36;
+  const radius = r0 + (r1 - r0) * ((yBot - level) / body);
+  const ripple = gh * 0.005;
+  const surface = [];
+  const STEPS = 48;
+  for (let i = 0; i < STEPS; i++) {
+    const a = (i / STEPS) * Math.PI * 2;
+    const x = Math.cos(a) * radius;
+    const z = Math.sin(a) * radius; // 正が手前
+    const y = level + Math.tan(tiltX) * x + Math.tan(tiltZ) * z * 0.8 + z * RIM + Math.sin(a * 3 + phase) * ripple;
+    surface.push([cx + x, y]);
   }
-  ctx.lineTo(cx + topHalf * 1.1, bottom);
-  ctx.closePath();
+
+  ctx.save();
+  ctx.clip(silhouette);
+  // 水の側面: 水面の手前半分から底まで
+  const side = new Path2D();
+  side.moveTo(...surface[0]);
+  for (let i = 1; i <= STEPS / 2; i++) side.lineTo(...surface[i]);
+  side.lineTo(cx - r1, yBot);
+  side.ellipse(cx, yBot, r0, ry0, 0, Math.PI, 0, true);
+  side.lineTo(cx + r1, surface[0][1]);
+  side.closePath();
   ctx.fillStyle = color;
-  ctx.fill();
+  ctx.fill(side);
+  const shade = ctx.createLinearGradient(cx - r1, 0, cx + r1, 0);
+  shade.addColorStop(0, 'rgba(0,0,0,0.28)');
+  shade.addColorStop(0.45, 'rgba(0,0,0,0)');
+  shade.addColorStop(1, 'rgba(0,0,0,0.22)');
+  ctx.fillStyle = shade;
+  ctx.fill(side);
+
+  // 水面: 少し明るくして、上から見えている面とわかるようにする
+  const top = new Path2D();
+  top.moveTo(...surface[0]);
+  for (const point of surface.slice(1)) top.lineTo(...point);
+  top.closePath();
+  ctx.fillStyle = color;
+  ctx.fill(top);
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.fill(top);
+  ctx.lineWidth = line * 0.6;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.stroke(top);
   ctx.restore();
 
-  ctx.lineWidth = Math.max(2, gh * 0.012);
+  // ガラスの手前側
+  ctx.lineWidth = line;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.strokeStyle = css('--muted');
-  ctx.stroke(path);
+  ctx.strokeStyle = muted;
+  ctx.beginPath();
+  ctx.moveTo(cx - r1, yTop);
+  ctx.lineTo(cx - r0, yBot);
+  ctx.ellipse(cx, yBot, r0, ry0, 0, Math.PI, 0, true);
+  ctx.lineTo(cx + r1, yTop);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(cx, yTop, r1, ry1, 0, 0, Math.PI);
+  ctx.stroke();
+
+  // 映り込みの光
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+  ctx.lineWidth = line * 1.6;
+  ctx.beginPath();
+  ctx.moveTo(cx - r1 * 0.66, yTop + body * 0.12);
+  ctx.lineTo(cx - r0 * 0.7, yBot - body * 0.14);
+  ctx.stroke();
 }
 
 /* ---------- 走行 ---------- */
@@ -201,8 +275,8 @@ function newRide(isDemo) {
     isDemo,
     startedAt: performance.now(),
     cleanups: [],
-    angle: 0,
-    velocity: 0,
+    tilt: { x: 0, z: 0 },
+    tiltSpeed: { x: 0, z: 0 },
     level: 0,
     frame: 0,
     lastFrame: performance.now(),
@@ -211,7 +285,77 @@ function newRide(isDemo) {
     motionCount: 0,
     gpsState: 'waiting',
     wakeLock: null,
+    look: null,
   };
+}
+
+/* ---------- カメラ先読み ---------- */
+// GPSの速度があれば時速15km以上を走行中とする。なければ揺れの計測の判定に従う
+function isMoving(engine, t) {
+  const fresh = engine.speed !== null && engine.speedT > t - 5;
+  return fresh ? engine.speed >= ADVISE_MIN_SPEED : engine.moving;
+}
+
+function setLookState(text, warn = false) {
+  const el = $('lookState');
+  if (el.textContent !== text) el.textContent = text;
+  el.dataset.level = warn ? 'warn' : '';
+}
+
+async function startLookahead(current) {
+  const look = {
+    camera: null,
+    advisor: new LookaheadAdvisor(),
+    counts: { leadBrake: 0, closing: 0 },
+    frames: 0,
+    leadFrames: 0,
+    state: 'starting',
+    error: '',
+  };
+  current.look = look;
+  setLookState('カメラを準備しています');
+  try {
+    // カメラ関係は使うときだけ読み込む
+    const { CameraLookahead } = await import('./lookahead.js');
+    if (ride !== current) return;
+    const camera = new CameraLookahead($('camVideo'), (t, result) => onLookFrame(current, t, result));
+    look.camera = camera;
+    current.cleanups.push(() => camera.stop());
+    // 準備の途中で走行を終えたら、開いたカメラをすぐ閉じる
+    await camera.openCamera();
+    if (ride !== current) return camera.stop();
+    $('camVideo').hidden = false;
+    setLookState('検出モデルを読み込んでいます');
+    await camera.start();
+    if (ride !== current) return camera.stop();
+    look.state = 'running';
+    setLookState('前の車を探しています');
+  } catch (error) {
+    look.camera?.stop();
+    look.state = 'failed';
+    look.error = error.message?.match(/[ぁ-ん]/) ? error.message : '検出モデルを読み込めませんでした。揺れの計測だけ続けます。';
+    $('camVideo').hidden = true;
+    setLookState('カメラ先読みは止まっています');
+  }
+}
+
+function onLookFrame(current, t, { lead, brakeLit }) {
+  if (ride !== current) return;
+  const look = current.look;
+  const tracked = lead.status !== 'none' && lead.status !== 'lost';
+  look.frames++;
+  if (tracked) look.leadFrames++;
+  setLookState(
+    brakeLit ? '前の車: ブレーキ灯' : tracked ? '前の車を追跡中' : '前の車なし',
+    brakeLit || lead.status === 'closing',
+  );
+  const type = look.advisor.update(t, { moving: isMoving(current.engine, t), lead, brakeLit });
+  if (!type) return;
+  look.counts[type]++;
+  $('message').textContent = LOOK_COPY[type].name;
+  current.messageUntil = performance.now() + 3000;
+  chime();
+  speak(LOOK_COPY[type].say, true);
 }
 
 function handleEvent(event) {
@@ -231,11 +375,13 @@ function frame(now) {
   const { engine } = ride;
   const live = engine.live;
 
-  // 水面はばねで動かし、揺れた後しばらく波打たせる
-  const signal = live.long ?? live.mag;
-  const target = Math.max(-0.55, Math.min(0.55, (signal / 9.81) * 2.2));
-  ride.velocity += (-30 * (ride.angle - target) - 3.5 * ride.velocity) * dt;
-  ride.angle += ride.velocity * dt;
+  // 水面は前後と左右それぞれをばねで動かし、揺れた後しばらく波打たせる
+  const targets = { x: live.long ?? live.mag, z: live.lat ?? 0 };
+  for (const axis of ['x', 'z']) {
+    const target = Math.max(-0.5, Math.min(0.5, (targets[axis] / 9.81) * 2.2));
+    ride.tiltSpeed[axis] += (-30 * (ride.tilt[axis] - target) - 3.5 * ride.tiltSpeed[axis]) * dt;
+    ride.tilt[axis] += ride.tiltSpeed[axis] * dt;
+  }
 
   // 上がるときは即座に、下がるときはゆっくり。一瞬の点滅で視線を奪わないため
   ride.level = live.level > ride.level ? live.level : ride.level + (live.level - ride.level) * dt * 0.7;
@@ -246,7 +392,7 @@ function frame(now) {
     word.textContent = ['なめらか', '少し揺れています', '揺れが大きい'][stage];
   }
   ride.frame += dt;
-  drawGlass($('glass'), ride.angle, css(['--water', '--warn', '--bad'][stage]), ride.frame * 1.5);
+  drawGlass($('glass'), ride.tilt, css(['--water', '--warn', '--bad'][stage]), ride.frame * 1.5);
 
   if (ride.messageUntil && now > ride.messageUntil) {
     $('message').textContent = '';
@@ -364,6 +510,8 @@ async function startReal() {
     current.gpsState = 'none';
   }
 
+  if (settings.camera === 'on') startLookahead(current);
+
   requestWakeLock();
   const onVisible = () => {
     if (document.visibilityState === 'visible') requestWakeLock();
@@ -412,6 +560,8 @@ function teardown() {
   if (!ride) return;
   for (const fn of ride.cleanups) fn();
   ride.cleanups = [];
+  $('camVideo').hidden = true;
+  setLookState('');
   if ('speechSynthesis' in window) speechSynthesis.cancel();
 }
 
@@ -420,6 +570,7 @@ function finish() {
   teardown();
   const summary = ride.engine.summary();
   const isDemo = ride.isDemo;
+  const look = ride.look;
   ride = null;
   if (!isDemo && summary.movingSec >= 30) {
     const history = load(HISTORY_KEY, []);
@@ -432,6 +583,7 @@ function finish() {
     save(HISTORY_KEY, history.slice(0, 20));
   }
   renderResult(summary, isDemo);
+  renderLook(look);
   show('result');
   renderChart(summary);
 }
@@ -494,6 +646,29 @@ function renderResult(s, isDemo) {
   else if (!s.forwardReady) notes.push('加速と減速が少なく前後の向きを学習できなかったため、操作の種類を一部しか区別していません。');
   $('caveat').textContent = notes.join(' ');
   $('caveat').hidden = notes.length === 0;
+}
+
+function renderLook(look) {
+  $('lookSection').hidden = !look;
+  if (!look) return;
+  const rows = look.state === 'failed'
+    ? [[look.error, '']]
+    : [
+        [LOOK_COPY.leadBrake.name, `${look.counts.leadBrake}回`],
+        [LOOK_COPY.closing.name, `${look.counts.closing}回`],
+        ['前の車を捉えていた割合', look.frames ? `${Math.round((look.leadFrames / look.frames) * 100)}%` : '―'],
+      ];
+  $('lookRows').replaceChildren(
+    ...rows.map(([name, value]) => {
+      const li = document.createElement('li');
+      const a = document.createElement('span');
+      a.textContent = name;
+      const b = document.createElement('span');
+      b.textContent = value;
+      li.append(a, b);
+      return li;
+    }),
+  );
 }
 
 function renderChart(s) {
@@ -628,8 +803,14 @@ $('backBtn').addEventListener('click', () => {
 
 const soundMode = $('soundMode');
 const sensMode = $('sensMode');
+const cameraMode = $('cameraMode');
 soundMode.value = settings.sound;
 sensMode.value = settings.sens;
+cameraMode.value = settings.camera;
+cameraMode.addEventListener('change', () => {
+  settings.camera = cameraMode.value;
+  save(SETTINGS_KEY, settings);
+});
 soundMode.addEventListener('change', () => {
   settings.sound = soundMode.value;
   save(SETTINGS_KEY, settings);
@@ -640,7 +821,7 @@ sensMode.addEventListener('change', () => {
 });
 
 function drawLogo() {
-  drawGlass($('logo'), -0.12, css('--water'));
+  drawGlass($('logo'), { x: -0.12, z: 0.06 }, css('--water'));
 }
 renderHistory();
 drawLogo();

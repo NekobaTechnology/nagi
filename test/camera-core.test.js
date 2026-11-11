@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   LeadTracker,
+  LookaheadAdvisor,
   PerfStats,
   BrakeLightDetector,
   brakeLightScore,
@@ -162,37 +163,76 @@ test('測り始めは判定を保留し、見失って時間が経つと計り�
   assert.equal(tracker.update(2.1, [centered(200)], W, H).status, 'measuring');
 });
 
-function carPixels({ left = false, right = false, redBody = false }) {
-  const [w, h] = [30, 20];
+// 48x32 の車の枠。尾灯は昼でも点いている前提で、常に光らせておく
+function carPixels({ highMount = null, redBody = false }) {
+  const [w, h] = [48, 32];
   const data = new Uint8ClampedArray(w * h * 4);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const band = y >= 6 && y < 12;
-      const lit = band && ((left && x < 8) || (right && x >= 22));
-      const [r, g, b] = lit ? [240, 30, 30] : redBody ? [190, 40, 40] : [60, 60, 60];
-      data.set([r, g, b, 255], i);
+      const tail = y >= 20 && y < 26 && (x < 8 || x >= 40);
+      const lamp = y === 2 && x >= 18 && x < 30;
+      let color = redBody ? [190, 40, 40] : [150, 150, 150];
+      if (tail) color = [240, 40, 40];
+      if (lamp && highMount) color = highMount === 'orange' ? [250, 150, 60] : [240, 40, 40];
+      data.set([...color, 255], i);
     }
   }
   return [data, w, h];
 }
 
-test('左右が同時に赤く光ると点灯のスコアが上がる', () => {
-  assert.ok(brakeLightScore(...carPixels({ left: true, right: true })) > 0.1);
-  assert.equal(brakeLightScore(...carPixels({ left: true })), 0);
-  assert.equal(brakeLightScore(...carPixels({})), 0);
+test('補助ブレーキ灯が光ると点灯のスコアが上がる', () => {
+  assert.ok(brakeLightScore(...carPixels({ highMount: 'red' })).highMount > 0.03);
+  // 映像では橙に写ることがある
+  assert.ok(brakeLightScore(...carPixels({ highMount: 'orange' })).highMount > 0.03);
 });
 
-test('赤い車体をブレーキ灯と誤認しない', () => {
-  assert.equal(brakeLightScore(...carPixels({ redBody: true })), 0);
+test('尾灯だけが光っている車は点灯と判定しない', () => {
+  assert.equal(brakeLightScore(...carPixels({})).highMount, 0);
 });
 
-test('普段の値から増えたときだけ点灯と判定する', () => {
+test('赤い車体を補助ブレーキ灯と誤認しない', () => {
+  assert.equal(brakeLightScore(...carPixels({ redBody: true })).highMount, 0);
+  assert.equal(brakeLightScore(...carPixels({ redBody: true, highMount: 'red' })).highMount, 0);
+  // 赤い車は枠全体が赤い
+  assert.ok(brakeLightScore(...carPixels({ redBody: true })).red > 0.5);
+});
+
+const lamp = (highMount) => ({ highMount, red: 0.1 });
+const glow = (red) => ({ highMount: 0, red });
+
+test('点灯も消灯も、0.25秒続いたときだけ切り替える', () => {
   const detector = new BrakeLightDetector();
-  assert.equal(detector.update(0, 0.08), false);
-  assert.equal(detector.update(1, 0.09), false);
-  assert.equal(detector.update(2, 0.3), true);
-  assert.equal(detector.update(3, 0.08), false);
+  assert.equal(detector.update(0, lamp(0.05)), false);
+  assert.equal(detector.update(0.1, lamp(0)), false);
+  assert.equal(detector.update(0.2, lamp(0.05)), false);
+  assert.equal(detector.update(0.5, lamp(0.05)), true);
+  assert.equal(detector.update(0.6, lamp(0)), true);
+  assert.equal(detector.update(0.9, lamp(0)), false);
+});
+
+test('夜は枠全体の赤いにじみが急に増えたら点灯と判定する', () => {
+  const detector = new BrakeLightDetector();
+  for (let i = 0; i <= 20; i++) detector.update(i * 0.1, glow(0.1));
+  assert.equal(detector.update(2.1, glow(0.7)), false);
+  assert.equal(detector.update(2.4, glow(0.55)), true);
+  assert.equal(detector.update(5, glow(0.5)), true);
+  detector.update(5.1, glow(0.1));
+  assert.equal(detector.update(5.4, glow(0.1)), false);
+});
+
+test('もともと赤い車は、その赤さを普段の値として扱う', () => {
+  const detector = new BrakeLightDetector();
+  for (let i = 0; i <= 50; i++) assert.equal(detector.update(i * 0.1, glow(0.6)), false);
+});
+
+test('ブレーキ中に追い始めても、一度離したあとの点灯は検出する', () => {
+  const detector = new BrakeLightDetector();
+  detector.update(0, glow(0.7));
+  for (let i = 1; i <= 10; i++) assert.equal(detector.update(i * 0.1, glow(0.6)), false);
+  for (let i = 11; i <= 20; i++) detector.update(i * 0.1, glow(0.1));
+  detector.update(2.1, glow(0.6));
+  assert.equal(detector.update(2.4, glow(0.6)), true);
 });
 
 test('処理速度を集計する', () => {
@@ -223,4 +263,50 @@ test('計測の後半で遅くなると発熱の疑いありと判定し、短�
   assert.equal(judgeThrottle([minute(20), minute(20)]).level, 'unknown');
   assert.equal(judgeThrottle([minute(20), minute(19), minute(19), minute(19), minute(5)]).level, 'good');
   assert.equal(judgeThrottle([minute(20), minute(16), minute(12), minute(12), minute(5)]).level, 'bad');
+});
+
+test('赤い光が続いても、いつまでも点灯のままにはならない', () => {
+  const detector = new BrakeLightDetector();
+  for (let i = 0; i <= 20; i++) detector.update(i * 0.1, glow(0.1));
+  let t = 2;
+  for (; t < 5; t += 0.1) detector.update(t, glow(0.5));
+  assert.equal(detector.update(t, glow(0.5)), true);
+  for (; t < 120; t += 0.1) detector.update(t, glow(0.5));
+  assert.equal(detector.update(t, glow(0.5)), false);
+});
+
+const lead = (status, secondsToReach = null) => ({ status, secondsToReach, box: {} });
+
+test('走行中に前の車のブレーキ灯が点いたら一度だけ知らせる', () => {
+  const advisor = new LookaheadAdvisor();
+  assert.equal(advisor.update(0, { moving: true, lead: lead('steady'), brakeLit: false }), null);
+  assert.equal(advisor.update(0.1, { moving: true, lead: lead('steady'), brakeLit: true }), 'leadBrake');
+  assert.equal(advisor.update(0.2, { moving: true, lead: lead('steady'), brakeLit: true }), null);
+});
+
+test('止まっているときは知らせず、点灯したまま走り出しても知らせない', () => {
+  const advisor = new LookaheadAdvisor();
+  assert.equal(advisor.update(0, { moving: false, lead: lead('steady'), brakeLit: true }), null);
+  assert.equal(advisor.update(1, { moving: true, lead: lead('steady'), brakeLit: true }), null);
+});
+
+test('同じ知らせは間を空け、別の知らせも続けて話さない', () => {
+  const advisor = new LookaheadAdvisor();
+  const blink = (t) => {
+    advisor.update(t, { moving: true, lead: lead('steady'), brakeLit: false });
+    return advisor.update(t + 0.1, { moving: true, lead: lead('steady'), brakeLit: true });
+  };
+  assert.equal(blink(0), 'leadBrake');
+  assert.equal(blink(3), null);
+  assert.equal(blink(9), 'leadBrake');
+  assert.equal(advisor.update(10, { moving: true, lead: lead('closing', 3), brakeLit: false }), null);
+  advisor.update(14, { moving: true, lead: lead('steady'), brakeLit: false });
+  assert.equal(advisor.update(15, { moving: true, lead: lead('closing', 3), brakeLit: false }), 'closing');
+});
+
+test('追いつくまでの見込みが長い接近や、見失った車では知らせない', () => {
+  const advisor = new LookaheadAdvisor();
+  assert.equal(advisor.update(0, { moving: true, lead: lead('closing', 8), brakeLit: false }), null);
+  assert.equal(advisor.update(1, { moving: true, lead: lead('lost'), brakeLit: true }), null);
+  assert.equal(advisor.update(2, { moving: true, lead: lead('closing', 4), brakeLit: false }), 'closing');
 });
