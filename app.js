@@ -137,11 +137,12 @@ function fitCanvas(canvas) {
   return { w, h };
 }
 
-// 少し見下ろした立体のコップ。左が車の後ろ側、奥と手前が車の左右
-// tilt.x は前後の揺れ、tilt.z は左右の揺れによる水面の傾き（ラジアン）
+// 運転席から少し見下ろした立体のコップ。画面の左右が車の左右、奥が車の前
+// tilt.x は左右の揺れ、tilt.z は前後の揺れによる水面の傾き（ラジアン）。
+// 正の tilt.x で右側が下がり、正の tilt.z で奥側が上がる
 const RIM = 0.26; // 縁の楕円のつぶれ具合。小さいほど真横から見た形になる
 
-function drawGlass(canvas, tilt, color, phase = 0) {
+function drawGlass(canvas, tilt, color, phase = 0, shake = 0) {
   const { w, h } = fitCanvas(canvas);
   if (!w || !h) return;
   const ctx = canvas.getContext('2d');
@@ -182,7 +183,8 @@ function drawGlass(canvas, tilt, color, phase = 0) {
   // 水面は重心を保ったまま、前後と左右の揺れで傾く
   const level = yTop + body * 0.36;
   const radius = r0 + (r1 - r0) * ((yBot - level) / body);
-  const ripple = gh * 0.005;
+  // 向きを学習する前でも揺れの大きさが分かるよう、波の高さに表す
+  const ripple = gh * 0.005 * (1 + shake * 2);
   const surface = [];
   const STEPS = 48;
   for (let i = 0; i < STEPS; i++) {
@@ -375,8 +377,9 @@ function frame(now) {
   const { engine } = ride;
   const live = engine.live;
 
-  // 水面は前後と左右それぞれをばねで動かし、揺れた後しばらく波打たせる
-  const targets = { x: live.long ?? live.mag, z: live.lat ?? 0 };
+  // 水面は左右と前後それぞれをばねで動かし、揺れた後しばらく波打たせる。
+  // 水は慣性で加速と反対へ寄る。右へ曲がれば左側が、ブレーキなら奥（前）側が上がる
+  const targets = { x: live.right ?? 0, z: -(live.long ?? 0) };
   for (const axis of ['x', 'z']) {
     const target = Math.max(-0.5, Math.min(0.5, (targets[axis] / 9.81) * 2.2));
     ride.tiltSpeed[axis] += (-30 * (ride.tilt[axis] - target) - 3.5 * ride.tiltSpeed[axis]) * dt;
@@ -392,7 +395,7 @@ function frame(now) {
     word.textContent = ['なめらか', '少し揺れています', '揺れが大きい'][stage];
   }
   ride.frame += dt;
-  drawGlass($('glass'), ride.tilt, css(['--water', '--warn', '--bad'][stage]), ride.frame * 1.5);
+  drawGlass($('glass'), ride.tilt, css(['--water', '--warn', '--bad'][stage]), ride.frame * 1.5, ride.level);
 
   if (ride.messageUntil && now > ride.messageUntil) {
     $('message').textContent = '';
@@ -407,7 +410,7 @@ function frame(now) {
   $('elapsed').textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
   const states = {
     waiting: 'GPSを待っています',
-    ok: engine.forwardReady ? '計測中' : '計測中（向きを学習中）',
+    ok: engine.forwardReady && engine.rightSign !== 0 ? '計測中' : '計測中（向きを学習中）',
     none: 'GPSなしで計測中',
     demo: 'デモ走行',
   };
@@ -497,7 +500,9 @@ async function startReal() {
         previous = { t, latitude: coords.latitude, longitude: coords.longitude };
         if (speed !== null && !Number.isNaN(speed)) {
           current.gpsState = 'ok';
-          current.engine.addGps(t, speed);
+          // 進行方向は、どちらが右かを学ぶためだけに使う
+          const heading = Number.isFinite(coords.heading) ? coords.heading : null;
+          current.engine.addGps(t, speed, heading);
         }
       },
       () => {
@@ -548,7 +553,7 @@ function startDemo(scenario) {
     while (cursor < samples.length && samples[cursor].t <= t) {
       const s = samples[cursor++];
       if (s.kind === 'motion') current.engine.addMotion(s.t, s.x, s.y, s.z);
-      else current.engine.addGps(s.t, s.speed);
+      else current.engine.addGps(s.t, s.speed, s.heading);
     }
     if (cursor >= samples.length) finish();
   }, 16);

@@ -26,6 +26,7 @@ const COOLDOWN = { brake: 5, accel: 5, turn: 5, rough: 5, jerk: 5, stop: 0, sway
 const HOLD_SEC = { brake: 0.3, accel: 0.3, turn: 0.4, rough: 0.3, jerk: 0.2 };
 
 const STEP = 0.05; // 内部処理は 20Hz
+const REVERSE_MAX_SPEED = 3; // m/s。これより遅い区間はバックかもしれない
 const RING = 200; // 10 秒分
 
 const alpha = (dt, tau) => 1 - Math.exp(-dt / tau);
@@ -92,7 +93,7 @@ export class RideEngine {
     this.buckets = [];
     this.bucket = { sum: 0, n: 0 };
 
-    this.live = { long: null, lat: null, mag: 0, jerk: 0, level: 0, sway: 0 };
+    this.live = { long: null, lat: null, right: null, mag: 0, jerk: 0, level: 0, sway: 0 };
   }
 
   resetForward() {
@@ -103,6 +104,21 @@ export class RideEngine {
     this.fwdDv = 0;
     this.gpsAcc = [0, 0, 0];
     this.gpsAccN = 0;
+    // 横方向の符号。iPhone と Android で加速度の符号が逆なので、
+    // GPS の進行方向の変化（右へ曲がると方位が増える）と照らして、どちらが右かを学ぶ
+    this.latS = 0;
+    this.latN = 0;
+    this.latE = 0;
+    this.latCount = 0;
+    this.gpsLat = 0;
+    this.gpsLatN = 0;
+  }
+
+  // 1 なら横加速度の生の値がそのまま右向き、-1 なら逆。学習前は 0
+  get rightSign() {
+    if (this.latCount < 4) return 0;
+    if (Math.abs(this.latS) / Math.sqrt(this.latN * this.latE + 1e-9) < 0.5) return 0;
+    return Math.sign(this.latS);
   }
 
   get forwardReady() {
@@ -219,7 +235,11 @@ export class RideEngine {
       const f = norm(sub(this.fwdS, scale(gHat, dot(this.fwdS, gHat))));
       long = dot(h, f);
       lat = dot(h, cross(gHat, f));
+      this.gpsLat += lat;
+      this.gpsLatN++;
     }
+    const sign = this.rightSign;
+    const right = lat !== null && sign !== 0 ? lat * sign : null;
 
     const active =
       this.moving && t >= this.suppressUntil && elapsed > 3 && this.tiltSince === null;
@@ -239,6 +259,7 @@ export class RideEngine {
     this.live = {
       long,
       lat,
+      right,
       mag,
       jerk,
       sway: Math.sqrt(this.swayEma),
@@ -291,7 +312,8 @@ export class RideEngine {
     this.onEvent(event);
   }
 
-  addGps(t, speed) {
+  // heading は北から時計回りの進行方向（度）。分からなければ null
+  addGps(t, speed, heading = null) {
     if (speed === null || !Number.isFinite(speed)) return;
     this.gpsSeen = true;
     const s = Math.max(0, speed);
@@ -299,7 +321,10 @@ export class RideEngine {
     if (this.lastGps) {
       const dt = t - this.lastGps.t;
       if (dt > 0 && dt < 10) this.distance += ((s + this.lastGps.s) / 2) * dt;
-      if (dt >= 0.5 && dt <= 3 && this.gpsAccN > 0) {
+      // GPS の速度には向きがないので、バックの減速を前進中のブレーキと取り違える。
+      // バックはほぼ時速11km未満なので、それより遅い区間は学習に使わない
+      const fastEnough = Math.max(s, this.lastGps.s) >= REVERSE_MAX_SPEED;
+      if (dt >= 0.5 && dt <= 3 && this.gpsAccN > 0 && fastEnough) {
         const dvdt = (s - this.lastGps.s) / dt;
         if (Math.abs(dvdt) > 0.3) {
           const meanH = scale(this.gpsAcc, 1 / this.gpsAccN);
@@ -310,10 +335,13 @@ export class RideEngine {
           this.fwdDv += Math.abs(s - this.lastGps.s);
         }
       }
+      this.learnRight(dt, s, heading);
     }
     this.gpsAcc = [0, 0, 0];
     this.gpsAccN = 0;
-    this.lastGps = { t, s };
+    this.gpsLat = 0;
+    this.gpsLatN = 0;
+    this.lastGps = { t, s, heading: Number.isFinite(heading) ? heading : null };
 
     this.speed = s;
     this.speedT = t;
@@ -326,6 +354,21 @@ export class RideEngine {
       this.stops++;
       this.checkStop(t);
     }
+  }
+
+  // 進行方向の変わり方から右向きの加速度を求め、横加速度の生の値と照らす
+  learnRight(dt, s, heading) {
+    const last = this.lastGps;
+    if (!Number.isFinite(heading) || last.heading === null || dt < 0.5 || dt > 3) return;
+    if (Math.min(s, last.s) < REVERSE_MAX_SPEED || this.gpsLatN === 0) return;
+    const turn = ((((heading - last.heading + 540) % 360) - 180) * Math.PI) / 180;
+    const right = ((s + last.s) / 2) * (turn / dt);
+    if (Math.abs(right) < 0.5) return;
+    const meanLat = this.gpsLat / this.gpsLatN;
+    this.latS += meanLat * right;
+    this.latN += right * right;
+    this.latE += meanLat * meanLat;
+    this.latCount++;
   }
 
   // 停止の瞬間にブレーキの減速が急に抜けると、体が揺り戻される

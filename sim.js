@@ -34,7 +34,15 @@ const brake = (peak, ramp, soft) => ({
   },
 });
 
-const SCENARIOS = {
+// バックで下がって止まる。止まるまでの減速は前向きの加速度になる
+const backUp = (dur, peak) => ({
+  dur,
+  reverse: true,
+  along: (t) => -peak * smoothstep(t / 0.5) * smoothstep((dur - t) / 0.5),
+});
+const stopReverse = (peak) => ({ stopReverse: true, along: () => peak });
+
+export const SCENARIOS = {
   smooth: [
     hold(3),
     launch(11, 1.0, 3),
@@ -48,6 +56,27 @@ const SCENARIOS = {
     brake(1.1, 2.5, true),
     hold(2),
   ],
+  // 右左のカーブを交互に曲がる。alat が正なら左へ曲がる
+  turns: [
+    hold(3),
+    launch(9, 1.5, 2),
+    cruise(4, 0.15),
+    curve(6, 2, 1.5),
+    cruise(4, 0.15),
+    curve(6, -2, 1.5),
+    cruise(4, 0.15),
+    curve(6, 2, 1.5),
+    cruise(4, 0.15),
+    curve(6, -2, 1.5),
+    cruise(4, 0.15),
+    curve(6, 2, 1.5),
+    cruise(4, 0.15),
+    curve(6, -2, 1.5),
+    brake(1.2, 2, true),
+    hold(2),
+  ],
+  // 駐車場からバックで出て、強めに止まってから走り出す
+  parking: [hold(3), backUp(4, 0.7), stopReverse(2.5), hold(2), backUp(3, 0.6), stopReverse(2.5), hold(2)],
   rough: [
     hold(3),
     launch(5, 2.9, 0.3),
@@ -88,7 +117,8 @@ function prng(seed) {
 
 /**
  * センサー入力の時系列を返す。
- * 各要素は { t, kind: 'motion', x, y, z } または { t, kind: 'gps', speed }
+ * 各要素は { t, kind: 'motion', x, y, z, truth } または { t, kind: 'gps', speed, heading }。
+ * truth は車の前後・横（左が正）の加速度で、テストの答え合わせに使う
  */
 export function simulate({
   scenario = 'smooth',
@@ -108,20 +138,31 @@ export function simulate({
   const out = [];
   const speeds = [];
   let t = 0;
-  let v = 0;
+  let v = 0; // 前進が正。バック中は負
+  let heading = 90;
   let nextGps = 1;
   let lastBump = -Infinity;
 
-  for (const phase of SCENARIOS[scenario]) {
+  const phases = Array.isArray(scenario) ? scenario : SCENARIOS[scenario];
+  for (const phase of phases) {
     let local = 0;
-    while (phase.stop ? v > 0 || local === 0 : local < phase.dur) {
+    const running = () => {
+      if (phase.stopReverse) return v < 0 || local === 0;
+      if (phase.stop) return v > 0 || local === 0;
+      return local < phase.dur;
+    };
+    while (running()) {
       let al = phase.along(local, v);
-      if (v <= 0 && al < 0) al = 0;
+      const backing = phase.reverse || phase.stopReverse;
+      if (!backing && v <= 0 && al < 0) al = 0;
       const lateral = phase.alat ? phase.alat(local) : 0;
-      v = Math.max(0, v + al * dt);
+      v = backing ? v + al * dt : Math.max(0, v + al * dt);
+      if (phase.stopReverse && v > 0) v = 0;
+      // 左へ曲がると方位は減る（北から時計回り）
+      if (Math.abs(v) > 0.5) heading = (heading - ((lateral / v) * dt * 180) / Math.PI + 360) % 360;
 
       // 停車中は路面振動なし。走行中は速度に応じた細かい振動を足す
-      const vib = v > 0.1 ? noise : 0.01;
+      const vib = Math.abs(v) > 0.1 ? noise : 0.01;
       if (bumpAmp && v > 1 && t - lastBump > bumpEvery) lastBump = t;
       const since = Number.isFinite(lastBump) ? t - lastBump : 0;
       const decay = Number.isFinite(lastBump) ? Math.exp(-since / 0.35) : 0;
@@ -139,13 +180,14 @@ export function simulate({
         x: sign * (R[0][0] * car[0] + R[0][1] * car[1] + R[0][2] * car[2]),
         y: sign * (R[1][0] * car[0] + R[1][1] * car[1] + R[1][2] * car[2]),
         z: sign * (R[2][0] * car[0] + R[2][1] * car[1] + R[2][2] * car[2]),
+        truth: { along: al, lateral },
       });
 
-      speeds.push({ t, v });
+      speeds.push({ t, v: Math.abs(v), heading });
       if (t >= nextGps) {
         const target = t - gpsLag;
         const sample = speeds.find((s) => s.t >= target) ?? speeds[0];
-        out.push({ t, kind: 'gps', speed: sample.v });
+        out.push({ t, kind: 'gps', speed: sample.v, heading: sample.v > 0.5 ? sample.heading : null });
         nextGps += 1;
       }
       t += dt;
@@ -163,6 +205,7 @@ export function simulate({
         x: sign * (R[0][0] * car[0] + R[0][1] * car[1] + R[0][2] * car[2]),
         y: sign * (R[1][0] * car[0] + R[1][1] * car[1] + R[1][2] * car[2]),
         z: sign * (R[2][0] * car[0] + R[2][1] * car[1] + R[2][2] * car[2]),
+        truth: { along: 0, lateral: 0 },
       });
       t += dt;
     }
@@ -174,7 +217,7 @@ export function simulate({
 export function feed(engine, samples) {
   for (const s of samples) {
     if (s.kind === 'motion') engine.addMotion(s.t, s.x, s.y, s.z);
-    else engine.addGps(s.t, s.speed);
+    else engine.addGps(s.t, s.speed, s.heading);
   }
   return engine;
 }
