@@ -44,7 +44,6 @@ const COPY = {
 };
 // カメラ先読みの知らせ。運転の採点には含めない
 const LOOK_COPY = {
-  leadBrake: { name: '前の車のブレーキ', say: '前の車がブレーキ' },
   closing: { name: '前の車への接近', say: '前の車に近づいています' },
 };
 const PRAISE = 'なめらかな運転が続いています';
@@ -308,7 +307,7 @@ async function startLookahead(current) {
   const look = {
     camera: null,
     advisor: new LookaheadAdvisor(),
-    counts: { leadBrake: 0, closing: 0 },
+    counts: { closing: 0 },
     frames: 0,
     leadFrames: 0,
     state: 'starting',
@@ -341,17 +340,14 @@ async function startLookahead(current) {
   }
 }
 
-function onLookFrame(current, t, { lead, brakeLit }) {
+function onLookFrame(current, t, { lead }) {
   if (ride !== current) return;
   const look = current.look;
   const tracked = lead.status !== 'none' && lead.status !== 'lost';
   look.frames++;
   if (tracked) look.leadFrames++;
-  setLookState(
-    brakeLit ? '前の車: ブレーキ灯' : tracked ? '前の車を追跡中' : '前の車なし',
-    brakeLit || lead.status === 'closing',
-  );
-  const type = look.advisor.update(t, { moving: isMoving(current.engine, t), lead, brakeLit });
+  setLookState(tracked ? '前の車を追跡中' : '前の車なし', lead.status === 'closing');
+  const type = look.advisor.update(t, { moving: isMoving(current.engine, t), lead });
   if (!type) return;
   look.counts[type]++;
   $('message').textContent = LOOK_COPY[type].name;
@@ -659,7 +655,6 @@ function renderLook(look) {
   const rows = look.state === 'failed'
     ? [[look.error, '']]
     : [
-        [LOOK_COPY.leadBrake.name, `${look.counts.leadBrake}回`],
         [LOOK_COPY.closing.name, `${look.counts.closing}回`],
         ['前の車を捉えていた割合', look.frames ? `${Math.round((look.leadFrames / look.frames) * 100)}%` : '―'],
       ];

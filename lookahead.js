@@ -1,13 +1,11 @@
-// なぎ: 走行画面のカメラ先読み。前の車を追い、ブレーキ灯と接近を毎フレーム知らせる
-import { BrakeLightDetector, LeadTracker, cropRegion } from './camera-core.js';
+// なぎ: 走行画面のカメラ先読み。前の車を追い、接近を毎フレーム知らせる
+import { LeadTracker, cropRegion } from './camera-core.js';
 import {
   LENS_KEY,
   createCrop,
   createDetector,
-  createSampler,
   detectVehicles,
   loadPosition,
-  readBrakeScore,
   sourceSize,
 } from './vision.js';
 
@@ -28,7 +26,7 @@ function requestStream(deviceId = null) {
 }
 
 export class CameraLookahead {
-  // onFrame(t, { lead, brakeLit }) は検出のたびに呼ばれる
+  // onFrame(t, { lead }) は検出のたびに呼ばれる
   constructor(video, onFrame) {
     this.video = video;
     this.onFrame = onFrame;
@@ -84,9 +82,7 @@ export class CameraLookahead {
     }
     this.detector = detector;
     this.crop = createCrop();
-    this.sampler = createSampler();
     this.tracker = new LeadTracker();
-    this.brake = new BrakeLightDetector();
     this.position = loadPosition();
     this.running = true;
     this.startedAt = performance.now();
@@ -116,14 +112,8 @@ export class CameraLookahead {
     const boxes = detectVehicles(this.detector, this.video, region, this.crop, now);
     const t = now / 1000;
     const lead = this.tracker.update(t, boxes, region.w, region.h);
-    const tracked = lead.status !== 'none' && lead.status !== 'lost';
-    const brakeLit = tracked
-      ? this.brake.update(t, readBrakeScore(this.sampler, lead.box, this.video, size, region))
-      : false;
-    // 夜はブレーキ灯のにじみで一瞬見失いやすい。その間も同じ車の普段の赤さを保つ
-    if (lead.status === 'none') this.brake.reset();
     this.frames++;
-    this.onFrame(t, { lead, brakeLit });
+    this.onFrame(t, { lead });
   }
 
   get fps() {

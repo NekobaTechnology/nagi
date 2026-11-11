@@ -277,36 +277,27 @@ test('赤い光が続いても、いつまでも点灯のままにはならな�
 
 const lead = (status, secondsToReach = null) => ({ status, secondsToReach, box: {} });
 
-test('走行中に前の車のブレーキ灯が点いたら一度だけ知らせる', () => {
+test('走行中に前の車へ急に近づいたら一度だけ知らせる', () => {
   const advisor = new LookaheadAdvisor();
-  assert.equal(advisor.update(0, { moving: true, lead: lead('steady'), brakeLit: false }), null);
-  assert.equal(advisor.update(0.1, { moving: true, lead: lead('steady'), brakeLit: true }), 'leadBrake');
-  assert.equal(advisor.update(0.2, { moving: true, lead: lead('steady'), brakeLit: true }), null);
+  assert.equal(advisor.update(0, { moving: true, lead: lead('steady') }), null);
+  assert.equal(advisor.update(0.1, { moving: true, lead: lead('closing', 3) }), 'closing');
+  assert.equal(advisor.update(0.2, { moving: true, lead: lead('closing', 2) }), null);
 });
 
-test('止まっているときは知らせず、点灯したまま走り出しても知らせない', () => {
+test('止まっているときは知らせず、同じ知らせは間を空ける', () => {
   const advisor = new LookaheadAdvisor();
-  assert.equal(advisor.update(0, { moving: false, lead: lead('steady'), brakeLit: true }), null);
-  assert.equal(advisor.update(1, { moving: true, lead: lead('steady'), brakeLit: true }), null);
-});
-
-test('同じ知らせは間を空け、別の知らせも続けて話さない', () => {
-  const advisor = new LookaheadAdvisor();
-  const blink = (t) => {
-    advisor.update(t, { moving: true, lead: lead('steady'), brakeLit: false });
-    return advisor.update(t + 0.1, { moving: true, lead: lead('steady'), brakeLit: true });
-  };
-  assert.equal(blink(0), 'leadBrake');
-  assert.equal(blink(3), null);
-  assert.equal(blink(9), 'leadBrake');
-  assert.equal(advisor.update(10, { moving: true, lead: lead('closing', 3), brakeLit: false }), null);
-  advisor.update(14, { moving: true, lead: lead('steady'), brakeLit: false });
-  assert.equal(advisor.update(15, { moving: true, lead: lead('closing', 3), brakeLit: false }), 'closing');
+  assert.equal(advisor.update(0, { moving: false, lead: lead('closing', 3) }), null);
+  advisor.update(1, { moving: true, lead: lead('steady') });
+  assert.equal(advisor.update(2, { moving: true, lead: lead('closing', 3) }), 'closing');
+  advisor.update(3, { moving: true, lead: lead('steady') });
+  assert.equal(advisor.update(5, { moving: true, lead: lead('closing', 3) }), null);
+  advisor.update(14, { moving: true, lead: lead('steady') });
+  assert.equal(advisor.update(15, { moving: true, lead: lead('closing', 3) }), 'closing');
 });
 
 test('追いつくまでの見込みが長い接近や、見失った車では知らせない', () => {
   const advisor = new LookaheadAdvisor();
-  assert.equal(advisor.update(0, { moving: true, lead: lead('closing', 8), brakeLit: false }), null);
-  assert.equal(advisor.update(1, { moving: true, lead: lead('lost'), brakeLit: true }), null);
-  assert.equal(advisor.update(2, { moving: true, lead: lead('closing', 4), brakeLit: false }), 'closing');
+  assert.equal(advisor.update(0, { moving: true, lead: lead('closing', 8) }), null);
+  assert.equal(advisor.update(1, { moving: true, lead: lead('lost') }), null);
+  assert.equal(advisor.update(2, { moving: true, lead: lead('closing', 4) }), 'closing');
 });

@@ -316,11 +316,11 @@ export function judgeThrottle(minutes) {
   return { level: 'good', text: '大きな低下なし', drop };
 }
 
-// 走行中だけ、前の車の変化を声で先に伝える。同じ知らせを繰り返さない
+// 走行中だけ、前の車への接近を声で先に伝える。同じ知らせを繰り返さない
+// ブレーキ灯の判定は誤検知が多かったため、走行画面では使わない（検証画面でのみ表示）
 export const ADVISE_MIN_SPEED = 15 / 3.6; // 渋滞や信号待ちの発進では鳴らさない
 const ADVISE_CLOSING_SECONDS = 5; // 追いつくまでの見込みがこれより短いときだけ伝える
-const ADVISE_COOLDOWN = { leadBrake: 8, closing: 12 };
-const ADVISE_GAP = 4; // 別の知らせでも、続けて話さない
+const ADVISE_COOLDOWN = 12;
 
 export class LookaheadAdvisor {
   constructor() {
@@ -328,33 +328,20 @@ export class LookaheadAdvisor {
   }
 
   reset() {
-    this.wasLit = false;
     this.wasClosing = false;
-    this.lastAt = { leadBrake: -Infinity, closing: -Infinity };
-    this.lastAny = -Infinity;
+    this.lastAt = -Infinity;
   }
 
-  // moving: 走行中か。brakeLit と lead は前の車の判定結果。知らせる種類か null を返す
-  update(t, { moving, lead, brakeLit }) {
+  // moving: 走行中か。lead は前の車の判定結果。知らせる種類か null を返す
+  update(t, { moving, lead }) {
     const tracked = lead && lead.status !== 'none' && lead.status !== 'lost';
-    const lit = Boolean(tracked && brakeLit);
     const closing = Boolean(
       tracked && lead.status === 'closing' && lead.secondsToReach !== null && lead.secondsToReach <= ADVISE_CLOSING_SECONDS,
     );
-    const litStarted = lit && !this.wasLit;
-    const closingStarted = closing && !this.wasClosing;
-    this.wasLit = lit;
+    const started = closing && !this.wasClosing;
     this.wasClosing = closing;
-    if (!moving) return null;
-
-    // ブレーキ灯のほうが早く分かるので優先する
-    for (const [type, started] of [['leadBrake', litStarted], ['closing', closingStarted]]) {
-      if (!started) continue;
-      if (t - this.lastAt[type] < ADVISE_COOLDOWN[type] || t - this.lastAny < ADVISE_GAP) continue;
-      this.lastAt[type] = t;
-      this.lastAny = t;
-      return type;
-    }
-    return null;
+    if (!moving || !started || t - this.lastAt < ADVISE_COOLDOWN) return null;
+    this.lastAt = t;
+    return 'closing';
   }
 }
